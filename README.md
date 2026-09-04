@@ -13,7 +13,7 @@
 
 ## 这个翻译器做了什么
 
-- **`gpu` 桩库(no-op)**:定义 `vec2/3/4<T>`、常用数学函数等与 WGSL 同名的类型与函数,**不实现任何功能**,只为了让 shader 代码能通过 rustc 类型检查。所有函数体都是 `unimplemented!()`。
+- **`gpu` 桩库(按需实现)**:定义 `vec2/3/4<T>`、`array<T,N>`、`texture_2d<T>`、`sampler`、常用数学函数等与 WGSL 同名的类型与函数。规则:**只实现"必须的功能"**——类型要有真实字段、容器要能存元素能下标、运算符要有语义(否则重放副本过不了 rustc);而 WGSL **数学/纹理内建函数保持 no-op**(`unimplemented!()`),因为 CPU 上永远不会执行 shader。
 - **`gpu-macro`(`#[shader]`)**:吃掉一个 `mod`,做三件事:
   1. 把 AST 打印成 WGSL 文本(`pub const WGSL: &str`);
   2. 剥掉"翻译用装饰属性"后**重放原代码**,让 rustc 用桩库做类型检查;
@@ -61,16 +61,19 @@
 | `#[group(0)] #[binding(0)] static u_scale: f32 = 1.0;` | 值类型 → uniform,初值丢弃 | `@group(0) @binding(0) var<uniform> u_scale: f32;` |
 | `#[group(0)] #[binding(1)] static tex: texture_2d<f32> = texture_2d::new();` | **handle**(纹理)无地址空间,初值丢弃 | `@group(0) @binding(1) var tex: texture_2d<f32>;` |
 | `#[group(0)] #[binding(2)] static smp: sampler = sampler;` | **handle**(采样器)无地址空间 | `@group(0) @binding(2) var smp: sampler;` |
+| `#[group(0)] #[binding(4)] #[storage(read_write)] static mut buf: PositionBuffer = ...;` | **storage buffer**;可写用 `static mut`(Rust-only),初值丢弃 | `@group(0) @binding(4) var<storage, read_write> buf: PositionBuffer;` |
 | `struct VsOut { ... }` | struct 定义;不允许泛型/tuple/空 | `struct VsOut { ... }` |
 | `fn helper(...) -> ... { }` | 普通函数 | `fn helper(...) -> ... { }` |
 
-> 一个 `#[shader] mod` 可以有多个入口(`@vertex` + `@fragment` 等),构成完整渲染管线的 vs/fs 配对。
+> 一个 `#[shader] mod` 可以有多个入口(`@vertex` + `@fragment` + `@compute`),构成完整渲染/计算管线的配对。
+> **`static mut` 只在 `#[storage(read_write)]` 下允许**,写入要包在 `unsafe {}` 里——这是 Rust-only 写法,翻译时 `unsafe` 块被**透明展开**,不产生任何 WGSL 痕迹。
 
 ### 2. 装饰属性(映射表)
 
 | Rust 属性 | 位置 | WGSL |
 |---|---|---|
 | `#[group(0)]` / `#[binding(0)]` | static | `@group(0)` / `@binding(0)` |
+| `#[storage]` / `#[storage(read)]` / `#[storage(read_write)]` | static | 地址空间 `<storage>` / `<storage, read_write>`(不是 @ 装饰) |
 | `#[vertex]` / `#[fragment]` / `#[compute]` | fn | `@vertex` / `@fragment` / `@compute` |
 | `#[workgroup_size(8, 8, 1)]` | compute fn | `@workgroup_size(8, 8, 1)` |
 | `#[builtin(position)]` | fn(装饰**返回值**) | `-> @builtin(position) vec4<f32>` |
@@ -134,6 +137,7 @@ fn vs_main(#[builtin(vertex_index)] vid: u32) -> VsOut {
 | `for k in 0..N { ... }` | `for (var k = 0; k < N; k = k + 1) { ... }` | 区间重写;`0..=N` → `<=` |
 | `break;` / `continue;` | 同构 | `break` 不允许带值 |
 | `return e;` / `return;` | 同构 | |
+| `unsafe { ... }` | (透明展开) | Rust-only 包装(如写 `static mut`),不产生任何 WGSL |
 
 ### 6. 表达式
 
@@ -153,6 +157,7 @@ fn vs_main(#[builtin(vertex_index)] vid: u32) -> VsOut {
 
 - 标量 `f32` / `i32` / `u32`(Rust 原生类型,1:1)
 - `vec2<T>` / `vec3<T>` / `vec4<T>`(桩库泛型结构体,尖括号语法两边一致)
+- `array<T, N>`(桩库真容器:存 `[T; N]`,支持 `usize`/`u32` 下标——WGSL 数组下标是 `u32`,Rust 侧直接 `arr[i]` 不用 `as usize`)
 - 模块内自定义 `struct`(不能泛型)
 - **handle 类型**:`texture_2d<T>`、`sampler`。模块级声明**没有地址空间**:
 
@@ -171,6 +176,7 @@ static smp: sampler = sampler;                     // @group(0) @binding(2) var 
 - `for` 遍历非区间(如 vector)、`0..` 开区间
 - `let` 无初值、`break 值`、带 label 的循环、裸块语句、`return` 出现在表达式位
 - 多段路径(`a::b::c`)、方法调用、闭包、宏语句、`swizzle`(`.xy` 之类 Rust 语法根本没有)
+- `array<T,N>` 的**字面量构造**(WGSL `array<f32,3>(1.0,2.0,3.0)` 没有对应的 Rust 语法)、**runtime 数组** `array<T>`(无 N)暂不支持——目前只有定长数组,出现在 static / struct 成员 / 下标读写里
 
 ## 项目结构
 
@@ -178,8 +184,8 @@ static smp: sampler = sampler;                     // @group(0) @binding(2) var 
 .
 ├── Cargo.toml            # workspace: 根 bin + gpu + gpu-macro
 ├── src/main.rs           # 演示 shader(#[shader] mod triangle)+ naga 校验单测
-├── gpu/                  # 桩库(no-op,只服务类型检查)
-│   └── src/lib.rs        #   vec2/3/4<T>、数学函数、运算符
+├── gpu/                  # 桩库(只实现"必须的功能",数学内建 no-op)
+│   └── src/lib.rs        #   vec2/3/4<T>、array<T,N>、texture/sampler、数学函数
 └── gpu-macro/            # proc-macro crate
     └── src/lib.rs        #   #[shader] 翻译器(Ctx::print_*) + 透传属性宏
 ```
@@ -198,10 +204,10 @@ cargo test
 
 ## 设计原则与现状
 
-- **桩库永远 no-op**:只骗过类型检查;函数体 `unimplemented!()`,不实现任何数值功能。
+- **桩库按需实现**:类型/容器/运算符等"必须的功能"要真实(否则重放副本过不了 rustc);WGSL 数学/纹理内建函数保持 no-op。
 - **只做 WGSL 标准语法**;标准没有的语法在翻译时报错并指向源码位置。
 - **两条护栏**:rustc 类型检查(重放副本)+ naga 完整校验(测试)。
-- 现状:uniform(标量/向量)与 handle(texture_2d/sampler)模块级声明、struct、属性映射、if/else、loop/while/for、break/continue/return、构造器/cast、多入口(vs+fs)、纹理函数透传都有;storage buffer、UBO 布局属性(@size/@align)、array、矩阵、compute 示例还没做。
+- 现状:uniform / storage(读写)/ texture / sampler 模块级声明、定长 `array<T,N>`、struct、属性映射、if/else、loop/while/for、break/continue/return、unsafe 透明展开、多入口(vs+fs+compute)、构造器/cast/纹理函数透传都有;runtime 数组、UBO 布局属性(@size/@align)、矩阵、数组字面量还没做。
 
 ## 已知取舍
 

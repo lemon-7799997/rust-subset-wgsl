@@ -59,6 +59,7 @@ fn is_decoration(attr: &Attribute) -> bool {
                     | "location"
                     | "workgroup_size"
                     | "interpolate"
+                    | "storage"
             )
         })
 }
@@ -292,6 +293,10 @@ impl Ctx<'_> {
                 m,
                 "禁止: WGSL 标准没有 match/模式匹配(本翻译只做 WGSL 存在的语法), 请改写 if/else",
             )),
+            Expr::Unsafe(u) => Err(syn::Error::new_spanned(
+                u,
+                "unsafe 块只能以语句形式出现(如包住对 static mut 的写), 不能当表达式用",
+            )),
             Expr::Break(_) | Expr::Continue(_) => {
                 Err(syn::Error::new_spanned(e, "break/continue 只能作为语句"))
             }
@@ -353,6 +358,8 @@ impl Ctx<'_> {
                     Ok(format!("{pad}break;"))
                 }
                 Expr::Block(b) => Err(err(b, "裸块语句")),
+                // Rust-only 包装(如写 static mut 的 unsafe),翻译时透明展开
+                Expr::Unsafe(u) => self.print_block(&u.block.stmts, pad),
                 _ => Ok(format!("{pad}{};", self.print_expr(e)?)),
             },
             Stmt::Macro(m) => Err(err(m, "宏语句")),
@@ -500,6 +507,14 @@ impl Ctx<'_> {
             }
         }
 
+        // 返回值装饰必须有返回类型;没有 → 报错而不是静默丢掉装饰
+        if !ret_decor.is_empty() && matches!(f.sig.output, ReturnType::Default) {
+            return Err(syn::Error::new_spanned(
+                &f.sig.output,
+                "fn 上的 #[builtin(..)]/#[location(..)] 是\"返回值装饰\",要求函数声明返回类型; \
+                 没有返回类型时这些装饰没有可挂的地方(WGSL 入口要么返回位置要么返回 struct 成员)",
+            ));
+        }
         // 返回类型 + 返回值装饰
         let ret = match &f.sig.output {
             ReturnType::Default => String::new(),
@@ -530,14 +545,39 @@ impl Ctx<'_> {
     }
 }
 
+/// `#[storage]` / `#[storage(read)]` / `#[storage(read_write)]` → storage 访问模式。
+fn storage_mode(attr: &Attribute) -> Result<String, syn::Error> {
+    match &attr.meta {
+        Meta::Path(_) => Ok("read".into()), // 省略模式 = read(规范默认)
+        Meta::List(l) => {
+            let mode = l.tokens.to_string();
+            if matches!(mode.as_str(), "read" | "read_write") {
+                Ok(mode)
+            } else {
+                Err(syn::Error::new_spanned(
+                    attr,
+                    "storage 只支持 #[storage] / #[storage(read)] / #[storage(read_write)]",
+                ))
+            }
+        }
+        Meta::NameValue(_) => Err(syn::Error::new_spanned(attr, "storage 不能用 name=value 形式")),
+    }
+}
+
 fn trans_static(s: &ItemStatic) -> Result<String, syn::Error> {
     let mut decors = Vec::new();
     let (mut has_group, mut has_binding) = (false, false);
+    // storage_mode: None=没写 storage;Some("read"|"read_write")=#[storage(...)]
+    let mut storage_attr: Option<String> = None;
     for attr in &s.attrs {
         if let Some((name, text)) = attr_decor(attr) {
             match name.as_str() {
                 "group" => has_group = true,
                 "binding" => has_binding = true,
+                "storage" => {
+                    storage_attr = Some(storage_mode(attr)?);
+                    continue; // 不是 @ 装饰,是地址空间
+                }
                 _ => {}
             }
             decors.push(text);
@@ -546,16 +586,27 @@ fn trans_static(s: &ItemStatic) -> Result<String, syn::Error> {
     if !(has_group && has_binding) {
         return Err(syn::Error::new_spanned(
             s,
-            "模块级 static 需要 #[group(..)] + #[binding(..)](翻译成 uniform 或 texture/sampler 声明)",
+            "模块级 static 需要 #[group(..)] + #[binding(..)](uniform / storage / texture / sampler 声明)",
         ));
     }
-    if matches!(s.mutability, syn::StaticMutability::Mut(_)) {
-        return Err(err(s, "static mut"));
+    // 可写 storage 在 Rust 侧用 `static mut` 表达(Rust-only 手段,
+    // 写入要包 unsafe 块,翻译时 unsafe 被透明剥掉)。
+    let is_mut = matches!(s.mutability, syn::StaticMutability::Mut(_));
+    match (&storage_attr, is_mut) {
+        (Some(mode), true) if mode == "read_write" => {}
+        (Some(_), true) => {
+            return Err(syn::Error::new_spanned(
+                s,
+                "写 storage 需要 #[storage(read_write)] + `static mut`",
+            ))
+        }
+        (None, true) => return Err(err(s, "static mut 只能用于 #[storage(read_write)] buffer")),
+        _ => {}
     }
+
     let ty_text = print_type(&s.ty)?;
     // handle 类型(texture/sampler)在 WGSL 里没有地址空间:
     //   @group(0) @binding(1) var tex: texture_2d<f32>;
-    // 其余类型走 uniform 地址空间。
     let is_handle = match s.ty.as_ref() {
         Type::Path(tp) if tp.qself.is_none() => tp
             .path
@@ -564,7 +615,24 @@ fn trans_static(s: &ItemStatic) -> Result<String, syn::Error> {
             .is_some_and(|seg| matches!(seg.ident.to_string().as_str(), "texture_2d" | "sampler")),
         _ => false,
     };
-    let addr = if is_handle { "" } else { "<uniform>" };
+    // 地址空间三选一: handle(无)/ storage(...)/ uniform
+    let addr = match (&storage_attr, is_handle) {
+        (Some(_), true) => {
+            return Err(syn::Error::new_spanned(
+                s,
+                "handle 类型(texture/sampler)不能是 #[storage] buffer",
+            ))
+        }
+        (Some(mode), false) => {
+            if mode == "read_write" {
+                "<storage, read_write>"
+            } else {
+                "<storage>"
+            }
+        }
+        (None, true) => "",
+        (None, false) => "<uniform>",
+    };
     // 初值 `= ...` 丢弃:WGSL 的 var 声明没有初值
     Ok(format!(
         "{} var{addr} {}: {ty_text};",
@@ -724,7 +792,7 @@ pub fn shader(_args: TokenStream, item: TokenStream) -> TokenStream {
     let ident = &module.ident;
     let vis = &module.vis;
     let expanded = quote! {
-        #[allow(dead_code, unused_imports)]
+        #[allow(dead_code, unused_imports, static_mut_refs)]
         #vis mod #ident {
             #(#stripped)*
             /// 翻译产物(WGSL)
@@ -752,5 +820,6 @@ macro_rules! passthrough {
 }
 
 passthrough!(
-    group, binding, vertex, fragment, compute, workgroup_size, builtin, location, interpolate
+    group, binding, vertex, fragment, compute, workgroup_size, builtin, location, interpolate,
+    storage
 );

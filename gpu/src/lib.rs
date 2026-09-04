@@ -237,3 +237,54 @@ pub fn textureDimensions<T>(t: texture_2d<T>, level: i32) -> vec2<u32> {
     let _ = (t, level);
     unimplemented!("no-op stub: only for type checking")
 }
+
+// ============================================================================
+// array<T, N>:真容器(桩库规则:只实现"必须的功能")
+// 存真实元素、支持下标读写(usize + u32)——没有这些重放副本就没法通过
+// rustc 类型检查。WGSL 里数组下标是 u32/i32,所以直接支持 u32 下标,
+// 让 Rust 侧写法和 WGSL 源一致。数学类内建仍保持 no-op。
+// ============================================================================
+
+pub struct array<T, const N: usize> {
+    elems: [T; N],
+}
+
+impl<T, const N: usize> array<T, N> {
+    /// 从 Rust 定长数组构造(给 static / 局部提供可类型检查的值;
+    /// 翻译后数组是 WGSL 声明,初值会被丢弃)。
+    #[inline]
+    pub const fn from_arr(elems: [T; N]) -> Self {
+        array { elems }
+    }
+}
+
+impl<T, const N: usize> core::ops::Index<usize> for array<T, N> {
+    type Output = T;
+    #[inline]
+    fn index(&self, i: usize) -> &T {
+        &self.elems[i]
+    }
+}
+
+impl<T, const N: usize> core::ops::IndexMut<usize> for array<T, N> {
+    #[inline]
+    fn index_mut(&mut self, i: usize) -> &mut T {
+        &mut self.elems[i]
+    }
+}
+
+// WGSL 风格:直接用 u32 下标(不需要 `as usize`)
+impl<T, const N: usize> core::ops::Index<u32> for array<T, N> {
+    type Output = T;
+    #[inline]
+    fn index(&self, i: u32) -> &T {
+        &self.elems[i as usize]
+    }
+}
+
+impl<T, const N: usize> core::ops::IndexMut<u32> for array<T, N> {
+    #[inline]
+    fn index_mut(&mut self, i: u32) -> &mut T {
+        &mut self.elems[i as usize]
+    }
+}

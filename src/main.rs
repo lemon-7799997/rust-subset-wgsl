@@ -1,11 +1,12 @@
 //! ============================================================================
-//! 尝试 #5 —— 片元入口 + 纹理/采样器(第一个"能渲染"的模块:vs + fs 配对):
-//!   - `gpu` 桩库: vec2/3/4<T> + 数学函数 + texture_2d/sampler handle(no-op)
+//! 尝试 #6 —— storage buffer + compute(桩库规则改为"只实现必须的功能"):
+//!   - `gpu` 桩库: vec2/3/4<T> + 数学函数(no-op)+ array<T,N>(真容器:
+//!     元素存储 + usize/u32 下标)+ texture_2d/sampler handle
 //!   - `gpu-macro` 的 #[shader]:
-//!       * static: uniform 类型带地址空间;texture_2d/sampler 不带(handle)
-//!       * 模块内 struct、if/else、loop/while/for、break/continue/return
-//!       * 同一模块多个入口(@vertex + @fragment)
-//!       * match / 模式匹配 / 引用 / if 当表达式 … → 编译报错
+//!       * static: uniform / #[storage(read_write)](static mut)/ handle
+//!       * unsafe 块透明展开(写 static mut 的 Rust-only 包装)
+//!       * struct、if/else、loop/while/for、break/continue/return、array 下标
+//!       * 三入口:@vertex + @fragment + @compute
 //!   - naga 单测: parse + Validator 完整校验
 //! ============================================================================
 
@@ -13,22 +14,25 @@ use gpu_macro::shader;
 
 // ---- 期望生成的 WGSL(翻译产物,节选) ----
 // @group(0) @binding(0) var<uniform> u_scale: f32;
-// @group(0) @binding(1) var tex: texture_2d<f32>;     // handle: 没有地址空间
+// @group(0) @binding(1) var tex: texture_2d<f32>;       // handle: 无地址空间
 // @group(0) @binding(2) var smp: sampler;
 // @group(0) @binding(3) var<uniform> u_color: vec4<f32>;
 //
-// struct VsOut {
-//     @builtin(position) pos: vec4<f32>,
-//     @location(0) uv: vec2<f32>,
+// struct PositionBuffer {
+//     pos: array<vec4<f32>, 8>,
 // }
 //
-// @vertex
-// fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut { ... }
+// @group(0) @binding(4) var<storage, read_write> buf: PositionBuffer;
 //
-// @fragment
-// fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
-//     let c = textureSample(tex, smp, uv);
-//     return (c * u_color);
+// struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> }
+//
+// @vertex fn vs_main(...) -> VsOut { ... }
+// @fragment fn fs_main(...) -> @location(0) vec4<f32> { ... }
+//
+// @compute @workgroup_size(8)
+// fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+//     let i = gid.x;
+//     buf.pos[i] = vec4<f32>(f32(i) * u_scale, 0.0, 0.0, 1.0);   // unsafe 块已透明
 // }
 
 #[shader]
@@ -57,6 +61,21 @@ mod triangle {
     #[group(0)]
     #[binding(3)]
     static u_color: vec4<f32> = vec4::<f32>(1.0, 1.0, 1.0, 1.0);
+
+    // storage buffer(compute 可写):
+    //   #[storage(read_write)] + `static mut` = Rust 侧的可写全局
+    //   (写入要 unsafe 块;翻译时 unsafe 透明剥掉,初值也丢弃)
+    struct PositionBuffer {
+        pos: array<vec4<f32>, 8>,
+    }
+
+    #[allow(non_upper_case_globals)]
+    #[group(0)]
+    #[binding(4)]
+    #[storage(read_write)]
+    static mut buf: PositionBuffer = PositionBuffer {
+        pos: array::from_arr([vec4::<f32>(0.0, 0.0, 0.0, 1.0); 8]),
+    };
 
     // struct:字段上的装饰属性 → WGSL 成员 @装饰
     struct VsOut {
@@ -126,6 +145,17 @@ mod triangle {
         let c = textureSample(tex, smp, uv);
         return c * u_color;
     }
+
+    // compute 入口:写 storage buffer(Rust 侧 static mut 要 unsafe,
+    // 翻译时 unsafe 块透明展开成普通语句)
+    #[compute]
+    #[workgroup_size(8)]
+    fn cs_main(#[builtin(global_invocation_id)] gid: vec3<u32>) {
+        unsafe {
+            let i = gid.x; // u32 下标直接可用(桩库 array 实现了 Index<u32>)
+            buf.pos[i] = vec4::<f32>(i as f32 * u_scale, 0.0, 0.0, 1.0);
+        }
+    }
 }
 
 fn main() {
@@ -141,18 +171,14 @@ mod tests {
     /// 校验闭环:生成的 WGSL 必须能被 naga 解析并通过完整校验
     #[test]
     fn generated_wgsl_is_valid() {
-        let module =
-            naga::front::wgsl::parse_str(triangle::WGSL).expect("生成的 WGSL 语法不合法!");
+        let module = naga::front::wgsl::parse_str(triangle::WGSL).expect("生成的 WGSL 语法不合法!");
         // 深层校验:类型推断、struct 布局、地址空间、循环/continue 规则等
         let mut validator = Validator::new(ValidationFlags::all(), Capabilities::all());
         validator
             .validate(&module)
             .expect("生成的 WGSL 未通过 naga 完整校验!");
-        let stages: Vec<naga::ShaderStage> = module
-            .entry_points
-            .iter()
-            .map(|ep| ep.stage)
-            .collect();
+        let stages: Vec<naga::ShaderStage> =
+            module.entry_points.iter().map(|ep| ep.stage).collect();
         assert!(
             stages.contains(&naga::ShaderStage::Vertex),
             "缺少 @vertex 入口点"
@@ -160,6 +186,10 @@ mod tests {
         assert!(
             stages.contains(&naga::ShaderStage::Fragment),
             "缺少 @fragment 入口点"
+        );
+        assert!(
+            stages.contains(&naga::ShaderStage::Compute),
+            "缺少 @compute 入口点"
         );
     }
 }
