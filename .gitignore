@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Rust / Cargo build output
+/target
+**/target
+
+# Editors / IDE / misc
+.idea/
+*.iml
+.vscode/
+*.swp
+*.log
