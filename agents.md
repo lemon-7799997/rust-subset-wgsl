@@ -41,7 +41,7 @@ cargo check -p gpu-macro   # 只查宏 crate
   - `Ctx.field_order`:模块内 struct 名 → 成员声明顺序(Rust 命名字面量 → WGSL 位置构造器靠它);
   - `print_expr` / `print_stmt` / `print_block` / `print_if_stmt` / `render_loop_body` / `print_for`:表达式与语句递归打印;
   - `trans_fn`:入口/普通函数(参数装饰、返回值装饰、函数体)。
-- **模块级**:`trans_static`(static → var<uniform>)、`trans_struct`、`trans_module`(先收集 field_order,再逐 item 翻译)。
+- **模块级**:`trans_static`(static → var<uniform>;**texture_2d/sampler 等 handle 类型不加地址空间**)、`trans_struct`、`trans_module`(先收集 field_order,再逐 item 翻译)。
 - **宏入口 `shader`**:翻译(出错则直接返回编译错误)→ 剥装饰 → 重放 + `pub const WGSL`。文件底部还有一组**透传属性宏**(展开 = 原样返回),让装饰属性在 `#[shader]` 外也不报错。
 - **turbofish 规则**:`vec2::<f32>(..)` → `vec2<f32>(..)`(吃掉 `::`);syn 里泛型参数在 path 的 `AngleBracketed` 里,显式可读,翻译器不需要类型推断。
 

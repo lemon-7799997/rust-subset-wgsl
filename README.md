@@ -58,9 +58,13 @@
 | Rust 源 | 说明 | WGSL |
 |---|---|---|
 | `use gpu::*;` | 桩库导入,Rust-only | (不进 WGSL) |
-| `#[group(0)] #[binding(0)] static u_scale: f32 = 1.0;` | 模块级变量 → uniform,初值丢弃 | `@group(0) @binding(0) var<uniform> u_scale: f32;` |
+| `#[group(0)] #[binding(0)] static u_scale: f32 = 1.0;` | 值类型 → uniform,初值丢弃 | `@group(0) @binding(0) var<uniform> u_scale: f32;` |
+| `#[group(0)] #[binding(1)] static tex: texture_2d<f32> = texture_2d::new();` | **handle**(纹理)无地址空间,初值丢弃 | `@group(0) @binding(1) var tex: texture_2d<f32>;` |
+| `#[group(0)] #[binding(2)] static smp: sampler = sampler;` | **handle**(采样器)无地址空间 | `@group(0) @binding(2) var smp: sampler;` |
 | `struct VsOut { ... }` | struct 定义;不允许泛型/tuple/空 | `struct VsOut { ... }` |
 | `fn helper(...) -> ... { }` | 普通函数 | `fn helper(...) -> ... { }` |
+
+> 一个 `#[shader] mod` 可以有多个入口(`@vertex` + `@fragment` 等),构成完整渲染管线的 vs/fs 配对。
 
 ### 2. 装饰属性(映射表)
 
@@ -142,6 +146,7 @@ fn vs_main(#[builtin(vertex_index)] vid: u32) -> VsOut {
 | `p.x` | `p.x` | 字段访问(桩库字段名 = WGSL 名) |
 | `arr[i]` | `arr[i]` | 索引 |
 | `clamp(d, 0.0, 1.0)` 等 | 同 | 桩库数学函数,1:1 透传 |
+| `textureSample(tex, smp, uv)` 等 | 同 | 桩库纹理函数(`textureSample` / `textureLoad` / `textureDimensions`),1:1 透传 |
 | `VsOut { a: x, b: y }` | `VsOut(x, y)` | 见 struct 构造 |
 
 ### 7. 类型
@@ -149,6 +154,13 @@ fn vs_main(#[builtin(vertex_index)] vid: u32) -> VsOut {
 - 标量 `f32` / `i32` / `u32`(Rust 原生类型,1:1)
 - `vec2<T>` / `vec3<T>` / `vec4<T>`(桩库泛型结构体,尖括号语法两边一致)
 - 模块内自定义 `struct`(不能泛型)
+- **handle 类型**:`texture_2d<T>`、`sampler`。模块级声明**没有地址空间**:
+
+```rust
+// Rust                                     // WGSL
+static tex: texture_2d<f32> = texture_2d::new();  // @group(0) @binding(1) var tex: texture_2d<f32>;
+static smp: sampler = sampler;                     // @group(0) @binding(2) var smp: sampler;
+```
 
 ## 不支持的语法(编译报错,不是悄悄跳过)
 
@@ -189,7 +201,7 @@ cargo test
 - **桩库永远 no-op**:只骗过类型检查;函数体 `unimplemented!()`,不实现任何数值功能。
 - **只做 WGSL 标准语法**;标准没有的语法在翻译时报错并指向源码位置。
 - **两条护栏**:rustc 类型检查(重放副本)+ naga 完整校验(测试)。
-- 现状:`static → var<uniform>`、struct、属性映射、if/else、loop/while/for、break/continue/return、构造器/cast、基础表达式都有;纹理/采样器/storage buffer/UBO 布局属性/array 等还没做。
+- 现状:uniform(标量/向量)与 handle(texture_2d/sampler)模块级声明、struct、属性映射、if/else、loop/while/for、break/continue/return、构造器/cast、多入口(vs+fs)、纹理函数透传都有;storage buffer、UBO 布局属性(@size/@align)、array、矩阵、compute 示例还没做。
 
 ## 已知取舍
 

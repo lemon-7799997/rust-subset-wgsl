@@ -546,15 +546,31 @@ fn trans_static(s: &ItemStatic) -> Result<String, syn::Error> {
     if !(has_group && has_binding) {
         return Err(syn::Error::new_spanned(
             s,
-            "模块级 static 目前只支持 → var<uniform>: 需要 #[group(..)] + #[binding(..)]",
+            "模块级 static 需要 #[group(..)] + #[binding(..)](翻译成 uniform 或 texture/sampler 声明)",
         ));
     }
     if matches!(s.mutability, syn::StaticMutability::Mut(_)) {
         return Err(err(s, "static mut"));
     }
-    let ty = print_type(&s.ty)?;
-    // 初值 `= ...` 丢弃:WGSL 的 var<uniform> 没有初值
-    Ok(format!("{} var<uniform> {}: {ty};", decors.join(" "), s.ident))
+    let ty_text = print_type(&s.ty)?;
+    // handle 类型(texture/sampler)在 WGSL 里没有地址空间:
+    //   @group(0) @binding(1) var tex: texture_2d<f32>;
+    // 其余类型走 uniform 地址空间。
+    let is_handle = match s.ty.as_ref() {
+        Type::Path(tp) if tp.qself.is_none() => tp
+            .path
+            .segments
+            .last()
+            .is_some_and(|seg| matches!(seg.ident.to_string().as_str(), "texture_2d" | "sampler")),
+        _ => false,
+    };
+    let addr = if is_handle { "" } else { "<uniform>" };
+    // 初值 `= ...` 丢弃:WGSL 的 var 声明没有初值
+    Ok(format!(
+        "{} var{addr} {}: {ty_text};",
+        decors.join(" "),
+        s.ident
+    ))
 }
 
 fn trans_struct(s: &ItemStruct) -> Result<String, syn::Error> {

@@ -9,6 +9,7 @@
 //!     让"错得离谱"的调用在 Rust 侧就报错。
 #![allow(non_camel_case_types, non_snake_case)]
 
+use core::marker::PhantomData;
 use core::ops::{Add, Div, Mul, Sub};
 
 // ============================================================================
@@ -194,5 +195,45 @@ pub fn reflect<T>(i: T, n: T) -> T {
 
 pub fn refract<T>(i: T, n: T, eta: f32) -> T {
     let _ = (i, n, eta);
+    unimplemented!("no-op stub: only for type checking")
+}
+
+// ============================================================================
+// Handle 类型(纹理/采样器)
+// WGSL 里它们声明在模块级,但没有地址空间(不是 var<uniform>/<storage>):
+//   @group(0) @binding(1) var tex: texture_2d<f32>;
+//   @group(0) @binding(2) var smp: sampler;
+// 翻译器看到 texture_2d / sampler 类型时会跳过地址空间部分。
+// ============================================================================
+
+/// 2D 纹理(handle)。`new()` 只用于 Rust 侧 static 初始化,翻译时初值被丢弃。
+#[derive(Clone, Copy)]
+pub struct texture_2d<T>(PhantomData<T>);
+
+impl<T> texture_2d<T> {
+    #[inline]
+    pub const fn new() -> Self {
+        texture_2d(PhantomData)
+    }
+}
+
+/// 采样器(handle)。unit struct,值就是它自己。
+#[derive(Clone, Copy)]
+pub struct sampler;
+
+// ---- 常用纹理函数(no-op 桩,1:1 透传) ----
+
+pub fn textureSample<T>(t: texture_2d<T>, s: sampler, uv: vec2<f32>) -> vec4<f32> {
+    let _ = (t, s, uv);
+    unimplemented!("no-op stub: only for type checking")
+}
+
+pub fn textureLoad<T>(t: texture_2d<T>, coords: vec2<i32>, level: i32) -> vec4<f32> {
+    let _ = (t, coords, level);
+    unimplemented!("no-op stub: only for type checking")
+}
+
+pub fn textureDimensions<T>(t: texture_2d<T>, level: i32) -> vec2<u32> {
+    let _ = (t, level);
     unimplemented!("no-op stub: only for type checking")
 }

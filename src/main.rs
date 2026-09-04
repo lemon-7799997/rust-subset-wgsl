@@ -1,17 +1,21 @@
 //! ============================================================================
-//! 尝试 #4 —— struct + 禁止 match(WGSL 没有的语法一律报错):
-//!   - `gpu` 桩库: vec2/3/4<T> + 常用数学函数(no-op,只服务类型检查)
+//! 尝试 #5 —— 片元入口 + 纹理/采样器(第一个"能渲染"的模块:vs + fs 配对):
+//!   - `gpu` 桩库: vec2/3/4<T> + 数学函数 + texture_2d/sampler handle(no-op)
 //!   - `gpu-macro` 的 #[shader]:
-//!       * 模块内 struct(成员装饰 → @,字面量 → 位置构造器)
-//!       * if/else、loop/while/for、break/continue、return
+//!       * static: uniform 类型带地址空间;texture_2d/sampler 不带(handle)
+//!       * 模块内 struct、if/else、loop/while/for、break/continue/return
+//!       * 同一模块多个入口(@vertex + @fragment)
 //!       * match / 模式匹配 / 引用 / if 当表达式 … → 编译报错
-//!   - naga 单测: cargo test 用 naga 解析 WGSL,保证产物合法
+//!   - naga 单测: parse + Validator 完整校验
 //! ============================================================================
 
 use gpu_macro::shader;
 
-// ---- 期望生成的 WGSL(翻译产物) ----
+// ---- 期望生成的 WGSL(翻译产物,节选) ----
 // @group(0) @binding(0) var<uniform> u_scale: f32;
+// @group(0) @binding(1) var tex: texture_2d<f32>;     // handle: 没有地址空间
+// @group(0) @binding(2) var smp: sampler;
+// @group(0) @binding(3) var<uniform> u_color: vec4<f32>;
 //
 // struct VsOut {
 //     @builtin(position) pos: vec4<f32>,
@@ -19,9 +23,12 @@ use gpu_macro::shader;
 // }
 //
 // @vertex
-// fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
-//     ...(if/loop/while/for,同前面)...
-//     return VsOut(pos, uv);   // Rust 侧写成 VsOut { pos: ..., uv: ... }
+// fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut { ... }
+//
+// @fragment
+// fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+//     let c = textureSample(tex, smp, uv);
+//     return (c * u_color);
 // }
 
 #[shader]
@@ -29,12 +36,27 @@ mod triangle {
     // 类型/函数都来自 gpu 桩库 → 这行编译后 rustc 会真检查下面所有类型
     use gpu::*;
 
-    // static + 属性 => WGSL 模块级 var<uniform>
+    // static + 属性 => WGSL 模块级 var(见上面的期望产物)
     // #[allow] 不是装饰属性,宏会保留它;WGSL 全局变量约定就是小写命名
     #[allow(non_upper_case_globals)]
     #[group(0)]
     #[binding(0)]
     static u_scale: f32 = 1.0;
+
+    #[allow(non_upper_case_globals)]
+    #[group(0)]
+    #[binding(1)]
+    static tex: texture_2d<f32> = texture_2d::new();
+
+    #[allow(non_upper_case_globals)]
+    #[group(0)]
+    #[binding(2)]
+    static smp: sampler = sampler;
+
+    #[allow(non_upper_case_globals)]
+    #[group(0)]
+    #[binding(3)]
+    static u_color: vec4<f32> = vec4::<f32>(1.0, 1.0, 1.0, 1.0);
 
     // struct:字段上的装饰属性 → WGSL 成员 @装饰
     struct VsOut {
@@ -94,6 +116,16 @@ mod triangle {
             uv: p,
         };
     }
+
+    // 片元入口:参数 @location(0) uv 与顶点输出 VsOut.uv 配对
+    // fn 级 #[location(0)] = 装饰返回值(→ @location(0) vec4<f32>)
+    #[fragment]
+    #[location(0)]
+    fn fs_main(#[location(0)] uv: vec2<f32>) -> vec4<f32> {
+        // 纹理采样 × uniform 颜色
+        let c = textureSample(tex, smp, uv);
+        return c * u_color;
+    }
 }
 
 fn main() {
@@ -116,12 +148,18 @@ mod tests {
         validator
             .validate(&module)
             .expect("生成的 WGSL 未通过 naga 完整校验!");
+        let stages: Vec<naga::ShaderStage> = module
+            .entry_points
+            .iter()
+            .map(|ep| ep.stage)
+            .collect();
         assert!(
-            module
-                .entry_points
-                .iter()
-                .any(|ep| ep.stage == naga::ShaderStage::Vertex),
+            stages.contains(&naga::ShaderStage::Vertex),
             "缺少 @vertex 入口点"
+        );
+        assert!(
+            stages.contains(&naga::ShaderStage::Fragment),
+            "缺少 @fragment 入口点"
         );
     }
 }
