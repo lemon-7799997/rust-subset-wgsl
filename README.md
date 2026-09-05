@@ -182,15 +182,12 @@ static smp: sampler = sampler;                     // @group(0) @binding(2) var 
 
 ```
 .
-├── Cargo.toml            # workspace: 根 bin + gpu + gpu-macro + wgsl-macro
+├── Cargo.toml            # workspace: 根 bin + gpu + gpu-macro
 ├── src/main.rs           # 演示 shader(#[shader] mod triangle)+ naga 校验单测
-├── src/bin/wgsl_demo.rs  # 实验: wgsl!{} 混合解析 demo(cargo run --bin wgsl_demo)
 ├── gpu/                  # 桩库(只实现"必须的功能",数学内建 no-op)
 │   └── src/lib.rs        #   vec2/3/4<T>、array<T,N>、texture/sampler、数学函数
 ├── gpu-macro/            # proc-macro crate
 │   └── src/lib.rs        #   #[shader] 翻译器(Ctx::print_*) + 透传属性宏
-└── wgsl-macro/           # 实验 crate:混合解析的 wgsl!{}
-    └── src/lib.rs        #   顶层切块 → 合法 Rust 交 syn / WGSL 专属语法自写解析
 ```
 
 ## 使用

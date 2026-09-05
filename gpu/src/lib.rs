@@ -227,11 +227,8 @@ pub fn refract<T>(i: T, n: T, eta: f32) -> T {
 // ============================================================================
 
 /// 2D 纹理(handle)。`new()` 只用于 Rust 侧 static 初始化,翻译时初值被丢弃。
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, gpu_macro::ConstDefault)]
 pub struct texture_2d<T>(PhantomData<T>);
-
-#[derive(gpu_macro::ConstDefault)]
-pub struct MyStruct<T: ConstDefault>(PhantomData<T>);
 
 impl<T> texture_2d<T> {
     #[inline]
@@ -241,7 +238,7 @@ impl<T> texture_2d<T> {
 }
 
 /// 采样器(handle)。unit struct,值就是它自己。
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, gpu_macro::ConstDefault)]
 pub struct sampler;
 
 // ---- 常用纹理函数(no-op 桩,1:1 透传) ----

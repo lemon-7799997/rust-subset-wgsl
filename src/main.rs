@@ -38,7 +38,8 @@ use gpu_macro::shader;
 #[shader]
 mod triangle {
     // 类型/函数都来自 gpu 桩库 → 这行编译后 rustc 会真检查下面所有类型
-    use gpu::{ConstDefault, *};
+    use gpu::*;
+    use gpu_macro::ConstDefault;
 
     // static + 属性 => WGSL 模块级 var(见上面的期望产物)
     // #[allow] 不是装饰属性,宏会保留它;WGSL 全局变量约定就是小写命名
@@ -50,12 +51,12 @@ mod triangle {
     #[allow(non_upper_case_globals)]
     #[group(0)]
     #[binding(1)]
-    static tex: texture_2d<f32> = texture_2d::new();
+    static tex: texture_2d<f32> = ConstDefault::DEFAULT;
 
     #[allow(non_upper_case_globals)]
     #[group(0)]
     #[binding(2)]
-    static smp: sampler = sampler;
+    static smp: sampler = ConstDefault::DEFAULT;
 
     #[allow(non_upper_case_globals)]
     #[group(0)]
@@ -65,6 +66,7 @@ mod triangle {
     // storage buffer(compute 可写):
     //   #[storage(read_write)] + `static mut` = Rust 侧的可写全局
     //   (写入要 unsafe 块;翻译时 unsafe 透明剥掉,初值也丢弃)
+    #[derive(ConstDefault)]
     struct PositionBuffer {
         pos: array<vec4<f32>>,
     }
@@ -73,9 +75,7 @@ mod triangle {
     #[group(0)]
     #[binding(4)]
     #[storage(read_write)]
-    static mut buf: PositionBuffer = PositionBuffer {
-        pos: array::DEFAULT,
-    };
+    static mut buf: PositionBuffer = ConstDefault::DEFAULT;
 
     // struct:字段上的装饰属性 → WGSL 成员 @装饰
     struct VsOut {
