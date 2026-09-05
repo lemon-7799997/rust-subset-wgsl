@@ -1,26 +1,29 @@
-//! # 实验 crate:混合解析的 `wgsl! { ... }`
+//! # 实验 crate(第 2 版):`wgsl! { ... }` 混合解析 + **发射合法 Rust**
 //!
-//! 学习目的(宏三个核心事实):
-//!   1. proc-macro(函数式宏)拿到的是**不透明 token 流** —— rustc 只负责词法,
-//!      语法由我们自己按需解析,能合法解析 Rust 的部分就用 syn,解析不了的
-//!      就自己手写。
-//!   2. 顶层"切块"是混合架构的第一步:按 token 形状(顶层 `;` 结束一个声明,
-//!      顶层 `{...}` 结束一个 fn/struct)把输入切成一个个独立块。
-//!   3. 每块先试 `syn::parse2::<syn::Item>`(合法 Rust 就当 Rust item 处理),
-//!      失败就走自写的小解析器(WGSL 专属语法,如 `var<uniform> ...;`)。
+//! 上一版只输出"字符串摘要",里面引用的 `u_scale` 在产物里不存在,rustc 没法
+//! 检查、编辑器也没法跳转。这一版验证:
 //!
-//! 这个最小试验不做翻译,只做"分类 + 摘要",证明两种解析路径能在同一个
-//! 宏里共存。产物是一个编译期生成的摘要常量,方便在运行时打印观察。
+//!   > 想让宏参数里的名字(u_scale)可被类型检查 / go-to-definition / find
+//!   > references,唯一办法是让发射出的 Rust 里真实存在这个名字,并且发射
+//!   > token 时**保留源文件 span**(原样重放原始 token 天然保留;自写解析
+//!   > 改写的部分要复用原始的名字/类型 token,不要新建)。
+//!
+//! 处理策略(逐块双通道):
+//!   - 合法 Rust 块(fn/struct...)→ `syn::parse2::<Item>` 验证后**原样重放**;
+//!   - WGSL 专属块(`var<uniform> u_scale: f32;`)→ 自写解析后**改写成 Rust
+//!     全局**:`static u_scale: f32 = 0.0;` —— 名字 token 用源文件里那个,
+//!     span 不丢,于是 fn 里对 u_scale 的引用能解析到它。
+//!
+//! 学习点: token 保留 span = 语义可回贴;字符串化 = 语义丢失。
 
 use proc_macro::TokenStream;
-use proc_macro2::{Delimiter, TokenStream as TokenStream2, TokenTree};
+use proc_macro2::{Delimiter, Ident, TokenStream as TokenStream2, TokenTree};
 use quote::quote;
 
 // ============================================================================
-// 1. 顶层切块
+// 1. 顶层切块(同第 1 版:顶层 `;` 或 fn/struct 的花括号结束一个块)
 // ============================================================================
 
-/// 判断一个块是不是"花括号体"形状(fn/struct/impl ... 以顶层 `{...}` 收尾)。
 fn starts_with_braced_kind(t: Option<&TokenTree>) -> bool {
     matches!(
         t,
@@ -32,11 +35,6 @@ fn starts_with_braced_kind(t: Option<&TokenTree>) -> bool {
     )
 }
 
-/// 把输入的 token 流切成顶层块:
-///   - 顶层 `;` → 一个块结束(var<uniform> u_scale: f32; 这种);
-///   - 顶层 `{...}` 且块以 fn/struct 等开头 → 一个块结束(fn main() { ... })。
-/// 花括号内部的内容在 token 流里是"一个 Group",内部的 `;` 不会出现在顶层,
-/// 所以这个切分不需要维护深度计数器。
 fn split_top_level(input: TokenStream2) -> Vec<TokenStream2> {
     let trees: Vec<TokenTree> = input.into_iter().collect();
     let mut chunks: Vec<TokenStream2> = Vec::new();
@@ -44,15 +42,12 @@ fn split_top_level(input: TokenStream2) -> Vec<TokenStream2> {
 
     for tt in trees {
         let ends_chunk = match &tt {
-            // 顶层分号: 声明类块
             TokenTree::Punct(p) if p.as_char() == ';' => true,
-            // 顶层花括号 + 当前块开头是 fn/struct...: 函数/结构体类块
             TokenTree::Group(g) if g.delimiter() == Delimiter::Brace => {
                 starts_with_braced_kind(cur.first())
             }
             _ => false,
         };
-
         cur.push(tt);
         if ends_chunk {
             chunks.push(cur.drain(..).collect());
@@ -65,18 +60,22 @@ fn split_top_level(input: TokenStream2) -> Vec<TokenStream2> {
 }
 
 // ============================================================================
-// 2. 逐块分类:能当 Rust item 就交给 syn,否则自写解析器
+// 2. WGSL 专属声明: `var<地址空间> 名字: 类型;` 的自写解析器
 // ============================================================================
 
-fn token_text(tokens: &TokenStream2) -> String {
-    tokens.to_string()
+struct WgslVar {
+    /// 地址空间(如 uniform)—— Rust 发射时用不到,留给未来翻译
+    addr: String,
+    /// 名字(Ident 来自源文件,span 保留)
+    name: Ident,
+    /// 类型 token(来自源文件)
+    ty: TokenStream2,
+    /// 类型的文本(用来选 Rust 默认初值)
+    ty_text: String,
 }
 
-/// 解析 WGSL 专属的 `var<地址空间> 名字: 类型;`(手写小解析器,纯 token 匹配)。
-fn describe_wgsl_var(chunk: &TokenStream2) -> String {
+fn parse_wgsl_var(chunk: &TokenStream2) -> Result<Option<WgslVar>, String> {
     let tt: Vec<TokenTree> = chunk.clone().into_iter().collect();
-
-    // 期望形状: [var][<][addr][>][name][:][...ty...][;]
     let head = match (
         tt.get(0),
         tt.get(1),
@@ -94,98 +93,130 @@ fn describe_wgsl_var(chunk: &TokenStream2) -> String {
             Some(TokenTree::Punct(colon)),
         ) if kw == "var" && lt.as_char() == '<' && gt.as_char() == '>' && colon.as_char() == ':' =>
         {
-            (addr.to_string(), name.to_string())
+            (addr.to_string(), name.clone())
         }
-        _ => return format!("不认识 / 未支持的 WGSL 顶层片段: {}", token_text(chunk)),
+        _ => return Ok(None), // 不是 var<...> 形状,交给调用方报"不认识"
     };
 
-    // 类型部分: 冒号后到分号前 —— 这是"两边语法一致"的部分,
-    // 可以直接用 syn 解析成 Type 来验证(展示 syn 复用)。
     let mut ty_vec: Vec<TokenTree> = tt[6..].to_vec();
     if matches!(ty_vec.last(), Some(TokenTree::Punct(p)) if p.as_char() == ';') {
-        ty_vec.pop(); // 剥掉结尾分号再交给 syn
+        ty_vec.pop(); // 剥掉结尾分号
     }
-    let ty_tokens: TokenStream2 = ty_vec.into_iter().collect();
-    let ty_text = token_text(&ty_tokens);
-    match syn::parse2::<syn::Type>(ty_tokens.clone()) {
-        Ok(ty) => {
-            // 证明"类型这块真的用 syn 解析过了"
-            let _ = ty;
-            format!(
-                "WGSL 声明 var<{}> {}: {};(类型部分经 syn::Type 解析)",
-                head.0, head.1, ty_text
-            )
-        }
-        Err(_) => format!(
-            "WGSL 声明 var<{}> {}: {};(类型部分 syn 解析失败,原样透传)",
-            head.0, head.1, ty_text
-        ),
-    }
+    let ty: TokenStream2 = ty_vec.into_iter().collect();
+    Ok(Some(WgslVar {
+        addr: head.0,
+        name: head.1,
+        ty: ty.clone(),
+        ty_text: ty.to_string(),
+    }))
 }
 
-/// 合法的 Rust item → 用 syn 的 AST 描述它(证明真的走了 syn::Item/ItemFn)。
-fn describe_rust_item(item: &syn::Item) -> String {
-    match item {
-        syn::Item::Fn(f) => format!(
-            "合法 Rust fn `{}`(syn::ItemFn: 参数 {} 个, 语句 {} 条)",
-            f.sig.ident,
-            f.sig.inputs.len(),
-            f.block.stmts.len()
-        ),
-        syn::Item::Struct(s) => format!(
-            "合法 Rust struct `{}`(syn::ItemStruct: {} 个字段)",
-            s.ident,
-            match &s.fields {
-                syn::Fields::Named(nf) => nf.named.len(),
-                syn::Fields::Unnamed(uf) => uf.unnamed.len(),
-                syn::Fields::Unit => 0,
-            }
-        ),
-        other => format!("合法 Rust item(其他类型): {}", item_kind_name(other)),
-    }
-}
-
-fn item_kind_name(item: &syn::Item) -> &'static str {
-    match item {
-        syn::Item::Const(_) => "const",
-        syn::Item::Type(_) => "type",
-        syn::Item::Use(_) => "use",
-        syn::Item::Mod(_) => "mod",
-        syn::Item::Impl(_) => "impl",
-        syn::Item::Enum(_) => "enum",
-        _ => "…",
-    }
-}
-
-/// 一块输入 → 摘要字符串。先试 syn(合法 Rust),失败再试自写 WGSL 解析器。
-fn describe_chunk(chunk: &TokenStream2) -> String {
-    if let Ok(item) = syn::parse2::<syn::Item>(chunk.clone()) {
-        return format!("{}  ——  {}", token_text(chunk), describe_rust_item(&item));
-    }
-    describe_wgsl_var(chunk)
+/// 给 Rust 全局选一个默认初值(仅支持标量,实验够用)
+fn default_init(ty_text: &str) -> Option<TokenStream2> {
+    Some(match ty_text {
+        "f32" => quote!(0.0),
+        "i32" => quote!(0),
+        "u32" => quote!(0u32),
+        "bool" => quote!(false),
+        _ => return None,
+    })
 }
 
 // ============================================================================
-// 3. 宏入口:输出"每块摘要是啥"的编译期常量,方便运行观察
+// 3. 逐块发射合法 Rust
+// ============================================================================
+
+/// 一个块 → 对应的一小段合法 Rust。
+///   合法 Rust 块 → 原样重放(span 全保留);
+///   `var<uniform> u_scale: f32;` → `static u_scale: f32 = 0.0;`
+///   (名字/类型复用源文件 token;初值是我们新建的,span 无所谓)。
+fn emit_chunk(chunk: &TokenStream2) -> Result<TokenStream2, syn::Error> {
+    // 通道一: 合法 Rust,直接让 syn 验证后原样放行
+    if syn::parse2::<syn::Item>(chunk.clone()).is_ok() {
+        return Ok(chunk.clone());
+    }
+
+    // 通道二: WGSL 专属语法,自写解析 + 改写
+    let v = parse_wgsl_var(chunk)
+        .map_err(|msg| syn::Error::new_spanned(chunk, msg))?
+        .ok_or_else(|| {
+            syn::Error::new_spanned(
+                chunk,
+                format!(
+                    "既不是合法 Rust item,也不是支持的 WGSL 声明 `var<...> name: ty;`: {}",
+                    chunk.to_string()
+                ),
+            )
+        })?;
+
+    let init = default_init(&v.ty_text).ok_or_else(|| {
+        syn::Error::new_spanned(
+            &v.ty,
+            format!("实验版还不能给类型 `{}` 合成 Rust 默认初值", v.ty_text),
+        )
+    })?;
+    let name = &v.name;
+    let ty = &v.ty;
+
+    Ok(quote! {
+        // 从 `var<uniform> {}: {};` 改写而来(Rust 侧可解析的"全局")
+        #[allow(non_upper_case_globals)]
+        static #name: #ty = #init;
+    })
+}
+
+// ============================================================================
+// 4. 宏入口
 // ============================================================================
 
 #[proc_macro]
 pub fn wgsl(input: TokenStream) -> TokenStream {
     let input: TokenStream2 = input.into();
+    match expand(input) {
+        Ok(out) => out.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+fn expand(input: TokenStream2) -> Result<TokenStream2, syn::Error> {
     let chunks = split_top_level(input);
 
+    // 每块 → 合法 Rust(类型检查/跳转的基础)
+    let mut emitted = TokenStream2::new();
+    for chunk in &chunks {
+        emitted.extend(emit_chunk(chunk)?);
+    }
+
+    // 附带观察用摘要(纯字符串,不参与语义)
     let summaries: Vec<TokenStream2> = chunks
         .iter()
-        .map(|chunk| {
-            let s = describe_chunk(chunk);
-            quote!(#s) // &str → 字符串字面量 token
+        .map(|c| {
+            let s = summarize(c);
+            quote!(#s)
         })
         .collect();
 
-    quote! {
-        /// 实验产物:wgsl! 对每一块顶层片段的解析摘要
+    Ok(quote! {
+        #emitted
+
+        /// 观察用:每块被当成什么解析了(不影响编译/跳转)
         #[allow(non_upper_case_globals)]
         pub const CHUNKS: &[&str] = &[ #(#summaries),* ];
+    })
+}
+
+/// 摘要(第 1 版保留,方便看每块走了哪条路)
+fn summarize(chunk: &TokenStream2) -> String {
+    if syn::parse2::<syn::Item>(chunk.clone()).is_ok() {
+        return format!("[Rust item, 原样重放] {}", chunk.to_string());
     }
-    .into()
+    match parse_wgsl_var(chunk) {
+        Ok(Some(v)) => format!(
+            "[WGSL var, 改写为 Rust static] var<{}> {}: {};",
+            v.addr,
+            v.name,
+            v.ty.to_string()
+        ),
+        _ => format!("[未识别] {}", chunk.to_string()),
+    }
 }
