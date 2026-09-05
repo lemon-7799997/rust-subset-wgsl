@@ -837,52 +837,56 @@ passthrough!(
 pub fn derive_const_default(input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as syn::DeriveInput);
     let struct_name = &ast.ident;
-    
-    // 获取泛型参数并添加约束
+
+    // 只支持 struct;enum/union 给编译错误(别在宏里 panic)
+    let data = match &ast.data {
+        syn::Data::Struct(s) => s,
+        syn::Data::Enum(e) => {
+            return syn::Error::new_spanned(&e.enum_token, "ConstDefault derive 只支持 struct")
+                .to_compile_error()
+                .into()
+        }
+        syn::Data::Union(u) => {
+            return syn::Error::new_spanned(&u.union_token, "ConstDefault derive 只支持 struct")
+                .to_compile_error()
+                .into()
+        }
+    };
+
+    // 泛型参数并添加约束(类型参数统一补 ConstDefault bound)
     let mut generics = ast.generics.clone();
     for param in &mut generics.params {
         if let syn::GenericParam::Type(type_param) = param {
             type_param.bounds.push(syn::parse_quote!(ConstDefault));
         }
     }
-    
+
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-    
-    // 根据字段类型生成不同的初始化代码
-    let field_inits = match &ast.data {
-        syn::Data::Struct(data) => {
-            match &data.fields {
-                // ✅ 处理命名字段：struct S { field: T }
-                syn::Fields::Named(fields) => {
-                    let inits = fields.named.iter().map(|f| {
-                        let name = &f.ident;
-                        quote! { #name: ConstDefault::DEFAULT }
-                    });
-                    quote! { #(#inits),* }
-                }
-                // ✅ 处理未命名字段：struct S(T, U)
-                syn::Fields::Unnamed(fields) => {
-                    let inits = fields.unnamed.iter().map(|_| {
-                        quote! { ConstDefault::DEFAULT }
-                    });
-                    quote! { #(#inits),* }
-                }
-                // ✅ 处理单元结构体：struct S;
-                syn::Fields::Unit => {
-                    quote! {}
-                }
-            }
+
+    // 按字段形状生成正确的 Self 构造(三种写法不一样,不能都用 Self(...)):
+    //   命名字段  ->  Self { x: ..., y: ... }
+    //   元组字段  ->  Self(..., ...)
+    //   单元结构体 ->  Self
+    let default_expr = match &data.fields {
+        syn::Fields::Named(fields) => {
+            let inits = fields.named.iter().map(|f| {
+                let name = f.ident.as_ref().expect("named 字段必然有 ident");
+                quote! { #name: ConstDefault::DEFAULT }
+            });
+            quote! { Self { #(#inits),* } }
         }
-        _ => unimplemented!("只支持结构体"),
+        syn::Fields::Unnamed(fields) => {
+            let inits = fields.unnamed.iter().map(|_| quote! { ConstDefault::DEFAULT });
+            quote! { Self( #(#inits),* ) }
+        }
+        syn::Fields::Unit => quote! { Self },
     };
-    
+
     let expanded = quote! {
         impl #impl_generics ConstDefault for #struct_name #ty_generics #where_clause {
-            const DEFAULT: Self = Self(#field_inits);
-            // 对于元组结构体，使用 Self(字段1, 字段2, ...)
-            // 对于命名字段，使用 Self { 字段1, 字段2, ... }
+            const DEFAULT: Self = #default_expr;
         }
     };
-    
+
     expanded.into()
 }

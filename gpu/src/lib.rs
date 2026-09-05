@@ -286,14 +286,14 @@ impl<T: ConstDefault> array<T> {}
 impl<T: ConstDefault> core::ops::Index<usize> for array<T> {
     type Output = T;
     #[inline]
-    fn index(&self, i: usize) -> &T {
+    fn index(&self, _i: usize) -> &T {
         &self.phantom
     }
 }
 
 impl<T: ConstDefault> core::ops::IndexMut<usize> for array<T> {
     #[inline]
-    fn index_mut(&mut self, i: usize) -> &mut T {
+    fn index_mut(&mut self, _i: usize) -> &mut T {
         &mut self.phantom
     }
 }
@@ -302,14 +302,14 @@ impl<T: ConstDefault> core::ops::IndexMut<usize> for array<T> {
 impl<T: ConstDefault> core::ops::Index<u32> for array<T> {
     type Output = T;
     #[inline]
-    fn index(&self, i: u32) -> &T {
+    fn index(&self, _i: u32) -> &T {
         &self.phantom
     }
 }
 
 impl<T: ConstDefault> core::ops::IndexMut<u32> for array<T> {
     #[inline]
-    fn index_mut(&mut self, i: u32) -> &mut T {
+    fn index_mut(&mut self, _i: u32) -> &mut T {
         &mut self.phantom
     }
 }
