@@ -38,14 +38,14 @@ use gpu_macro::shader;
 #[shader]
 mod triangle {
     // 类型/函数都来自 gpu 桩库 → 这行编译后 rustc 会真检查下面所有类型
-    use gpu::*;
+    use gpu::{ConstDefault, *};
 
     // static + 属性 => WGSL 模块级 var(见上面的期望产物)
     // #[allow] 不是装饰属性,宏会保留它;WGSL 全局变量约定就是小写命名
     #[allow(non_upper_case_globals)]
     #[group(0)]
     #[binding(0)]
-    static u_scale: f32 = 1.0;
+    static u_scale: f32 = ConstDefault::DEFAULT;
 
     #[allow(non_upper_case_globals)]
     #[group(0)]
@@ -60,13 +60,13 @@ mod triangle {
     #[allow(non_upper_case_globals)]
     #[group(0)]
     #[binding(3)]
-    static u_color: vec4<f32> = vec4::<f32>(1.0, 1.0, 1.0, 1.0);
+    static u_color: vec4<f32> = ConstDefault::DEFAULT;
 
     // storage buffer(compute 可写):
     //   #[storage(read_write)] + `static mut` = Rust 侧的可写全局
     //   (写入要 unsafe 块;翻译时 unsafe 透明剥掉,初值也丢弃)
     struct PositionBuffer {
-        pos: array<vec4<f32>, 8>,
+        pos: array<vec4<f32>>,
     }
 
     #[allow(non_upper_case_globals)]
@@ -74,7 +74,7 @@ mod triangle {
     #[binding(4)]
     #[storage(read_write)]
     static mut buf: PositionBuffer = PositionBuffer {
-        pos: array::from_arr([vec4::<f32>(0.0, 0.0, 0.0, 1.0); 8]),
+        pos: array::DEFAULT,
     };
 
     // struct:字段上的装饰属性 → WGSL 成员 @装饰
@@ -150,11 +150,9 @@ mod triangle {
     // 翻译时 unsafe 块透明展开成普通语句)
     #[compute]
     #[workgroup_size(8)]
-    fn cs_main(#[builtin(global_invocation_id)] gid: vec3<u32>) {
-        unsafe {
-            let i = gid.x; // u32 下标直接可用(桩库 array 实现了 Index<u32>)
-            buf.pos[i] = vec4::<f32>(i as f32 * u_scale, 0.0, 0.0, 1.0);
-        }
+    unsafe fn cs_main(#[builtin(global_invocation_id)] gid: vec3<u32>) {
+        let i = gid.x; // u32 下标直接可用(桩库 array 实现了 Index<u32>)
+        buf.pos[i] = vec4::<f32>(i as f32 * u_scale, 0.0, 0.0, 1.0);
     }
 }
 

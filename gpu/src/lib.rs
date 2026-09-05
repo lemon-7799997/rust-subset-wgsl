@@ -11,26 +11,27 @@
 
 use core::marker::PhantomData;
 use core::ops::{Add, Div, Mul, Sub};
+use core::str;
 
 // ============================================================================
 // 向量类型: vec2<T> / vec3<T> / vec4<T>
 // 字段名 = WGSL 字段访问名(x/y/z/w),翻译时原样保留。
 // ============================================================================
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, gpu_macro::ConstDefault, PartialEq)]
 pub struct vec2<T> {
     pub x: T,
     pub y: T,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, gpu_macro::ConstDefault, PartialEq)]
 pub struct vec3<T> {
     pub x: T,
     pub y: T,
     pub z: T,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, gpu_macro::ConstDefault, PartialEq)]
 pub struct vec4<T> {
     pub x: T,
     pub y: T,
@@ -124,8 +125,27 @@ macro_rules! unary_fn {
 }
 
 unary_fn!(
-    abs, sign, fract, floor, ceil, round, trunc, sqrt, inverse_sqrt, exp, exp2,
-    log, log2, sin, cos, tan, asin, acos, atan, radians, degrees,
+    abs,
+    sign,
+    fract,
+    floor,
+    ceil,
+    round,
+    trunc,
+    sqrt,
+    inverse_sqrt,
+    exp,
+    exp2,
+    log,
+    log2,
+    sin,
+    cos,
+    tan,
+    asin,
+    acos,
+    atan,
+    radians,
+    degrees,
 );
 
 /// 二元函数(两个同类型参数)。
@@ -210,6 +230,9 @@ pub fn refract<T>(i: T, n: T, eta: f32) -> T {
 #[derive(Clone, Copy)]
 pub struct texture_2d<T>(PhantomData<T>);
 
+#[derive(gpu_macro::ConstDefault)]
+pub struct MyStruct<T: ConstDefault>(PhantomData<T>);
+
 impl<T> texture_2d<T> {
     #[inline]
     pub const fn new() -> Self {
@@ -239,52 +262,95 @@ pub fn textureDimensions<T>(t: texture_2d<T>, level: i32) -> vec2<u32> {
 }
 
 // ============================================================================
-// array<T, N>:真容器(桩库规则:只实现"必须的功能")
+// array<T>:真容器(桩库规则:只实现"必须的功能")
 // 存真实元素、支持下标读写(usize + u32)——没有这些重放副本就没法通过
 // rustc 类型检查。WGSL 里数组下标是 u32/i32,所以直接支持 u32 下标,
 // 让 Rust 侧写法和 WGSL 源一致。数学类内建仍保持 no-op。
 // ============================================================================
 
-pub struct array<T, const N: usize> {
-    elems: [T; N],
+pub trait ConstDefault {
+    const DEFAULT: Self;
 }
 
-impl<T, const N: usize> array<T, N> {
-    /// 从 Rust 定长数组构造(给 static / 局部提供可类型检查的值;
-    /// 翻译后数组是 WGSL 声明,初值会被丢弃)。
-    #[inline]
-    pub const fn from_arr(elems: [T; N]) -> Self {
-        array { elems }
-    }
+impl<T> ConstDefault for PhantomData<T> {
+    const DEFAULT: Self = PhantomData;
 }
 
-impl<T, const N: usize> core::ops::Index<usize> for array<T, N> {
+#[derive(gpu_macro::ConstDefault)]
+pub struct array<T: ConstDefault> {
+    phantom: T,
+}
+
+impl<T: ConstDefault> array<T> {}
+
+impl<T: ConstDefault> core::ops::Index<usize> for array<T> {
     type Output = T;
     #[inline]
     fn index(&self, i: usize) -> &T {
-        &self.elems[i]
+        &self.phantom
     }
 }
 
-impl<T, const N: usize> core::ops::IndexMut<usize> for array<T, N> {
+impl<T: ConstDefault> core::ops::IndexMut<usize> for array<T> {
     #[inline]
     fn index_mut(&mut self, i: usize) -> &mut T {
-        &mut self.elems[i]
+        &mut self.phantom
     }
 }
 
 // WGSL 风格:直接用 u32 下标(不需要 `as usize`)
-impl<T, const N: usize> core::ops::Index<u32> for array<T, N> {
+impl<T: ConstDefault> core::ops::Index<u32> for array<T> {
     type Output = T;
     #[inline]
     fn index(&self, i: u32) -> &T {
-        &self.elems[i as usize]
+        &self.phantom
     }
 }
 
-impl<T, const N: usize> core::ops::IndexMut<u32> for array<T, N> {
+impl<T: ConstDefault> core::ops::IndexMut<u32> for array<T> {
     #[inline]
     fn index_mut(&mut self, i: u32) -> &mut T {
-        &mut self.elems[i as usize]
+        &mut self.phantom
     }
+}
+
+// 为所有数值类型批量实现
+macro_rules! impl_const_default_for_numeric {
+    ($($ty:ty),*) => {
+        $(
+            impl ConstDefault for $ty {
+                const DEFAULT: Self = 0;
+            }
+        )*
+    };
+}
+
+// 调用宏
+impl_const_default_for_numeric! {
+    i8, i16, i32, i64, i128, isize,
+    u8, u16, u32, u64, u128, usize
+}
+
+impl ConstDefault for f32 {
+    const DEFAULT: Self = 0.0;
+}
+
+impl ConstDefault for f64 {
+    const DEFAULT: Self = 0.0;
+}
+
+impl ConstDefault for bool {
+    const DEFAULT: Self = false;
+}
+
+impl ConstDefault for char {
+    const DEFAULT: Self = '\0';
+}
+
+impl ConstDefault for String {
+    const DEFAULT: Self = String::new();
+}
+
+impl ConstDefault for &'static str {
+    const DEFAULT: Self = "";
 }

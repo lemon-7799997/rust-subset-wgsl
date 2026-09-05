@@ -34,8 +34,8 @@ use proc_macro::TokenStream;
 use quote::{quote, ToTokens};
 use std::collections::HashMap;
 use syn::{
-    Attribute, Expr, FnArg, GenericArgument, Item, ItemFn, ItemMod, ItemStatic, ItemStruct, Meta,
-    Pat, ReturnType, Stmt, Type,
+    parse_macro_input, Attribute, Expr, FnArg, GenericArgument, Item, ItemFn, ItemMod, ItemStatic,
+    ItemStruct, Meta, Pat, ReturnType, Stmt, Type,
 };
 
 // ============================================================================
@@ -44,24 +44,21 @@ use syn::{
 
 /// "翻译用装饰属性":在 WGSL 里对应 `@xxx`。剥掉后原代码才是合法 Rust。
 fn is_decoration(attr: &Attribute) -> bool {
-    attr.path()
-        .segments
-        .last()
-        .is_some_and(|s| {
-            matches!(
-                s.ident.to_string().as_str(),
-                "group"
-                    | "binding"
-                    | "vertex"
-                    | "fragment"
-                    | "compute"
-                    | "builtin"
-                    | "location"
-                    | "workgroup_size"
-                    | "interpolate"
-                    | "storage"
-            )
-        })
+    attr.path().segments.last().is_some_and(|s| {
+        matches!(
+            s.ident.to_string().as_str(),
+            "group"
+                | "binding"
+                | "vertex"
+                | "fragment"
+                | "compute"
+                | "builtin"
+                | "location"
+                | "workgroup_size"
+                | "interpolate"
+                | "storage"
+        )
+    })
 }
 
 /// 装饰属性 → (属性名, 目标 WGSL 文本),例如 ("binding", "@binding(0)")。
@@ -211,9 +208,7 @@ impl Ctx<'_> {
                 }
             }
             Expr::Field(f) => match &f.member {
-                syn::Member::Named(ident) => {
-                    Ok(format!("{}.{}", self.print_expr(&f.base)?, ident))
-                }
+                syn::Member::Named(ident) => Ok(format!("{}.{}", self.print_expr(&f.base)?, ident)),
                 syn::Member::Unnamed(_) => Err(err(f, "元组字段 .0/.1")),
             },
             Expr::Index(i) => Ok(format!(
@@ -248,9 +243,11 @@ impl Ctx<'_> {
                     return Err(err(s, "`..base` 更新语法"));
                 }
                 let name = path_last(&s.path);
-                let has_generics = s.path.segments.last().is_some_and(|seg| {
-                    !matches!(seg.arguments, syn::PathArguments::None)
-                });
+                let has_generics = s
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|seg| !matches!(seg.arguments, syn::PathArguments::None));
                 if has_generics {
                     return Err(syn::Error::new_spanned(
                         s,
@@ -276,9 +273,7 @@ impl Ctx<'_> {
                 for member in order {
                     match by_name.get(member) {
                         Some(e) => args.push(self.print_expr(e)?),
-                        None => {
-                            return Err(err(s, format!("struct 字面量缺少字段 `{member}`")))
-                        }
+                        None => return Err(err(s, format!("struct 字面量缺少字段 `{member}`"))),
                     }
                 }
                 Ok(format!("{name}({})", args.join(", ")))
@@ -313,7 +308,11 @@ impl Ctx<'_> {
                 if pi.by_ref.is_some() {
                     return Err(err(pi, "let ref"));
                 }
-                let kw = if pi.mutability.is_some() { "var" } else { "let" };
+                let kw = if pi.mutability.is_some() {
+                    "var"
+                } else {
+                    "let"
+                };
                 // WGSL 局部必须有初值
                 let init = match local.init.as_ref() {
                     Some(li) => &li.expr,
@@ -454,9 +453,8 @@ impl Ctx<'_> {
             syn::RangeLimits::Closed(_) => "<=",
         };
         let name = &pi.ident;
-        let header = format!(
-            "{pad}for (var {name} = {start}; {name} {cmp} {end}; {name} = {name} + 1) {{"
-        );
+        let header =
+            format!("{pad}for (var {name} = {start}; {name} {cmp} {end}; {name} = {name} + 1) {{");
         self.render_loop_body(&header, &f.body, pad)
     }
 
@@ -560,7 +558,10 @@ fn storage_mode(attr: &Attribute) -> Result<String, syn::Error> {
                 ))
             }
         }
-        Meta::NameValue(_) => Err(syn::Error::new_spanned(attr, "storage 不能用 name=value 形式")),
+        Meta::NameValue(_) => Err(syn::Error::new_spanned(
+            attr,
+            "storage 不能用 name=value 形式",
+        )),
     }
 }
 
@@ -607,14 +608,13 @@ fn trans_static(s: &ItemStatic) -> Result<String, syn::Error> {
     let ty_text = print_type(&s.ty)?;
     // handle 类型(texture/sampler)在 WGSL 里没有地址空间:
     //   @group(0) @binding(1) var tex: texture_2d<f32>;
-    let is_handle = match s.ty.as_ref() {
-        Type::Path(tp) if tp.qself.is_none() => tp
-            .path
-            .segments
-            .last()
-            .is_some_and(|seg| matches!(seg.ident.to_string().as_str(), "texture_2d" | "sampler")),
-        _ => false,
-    };
+    let is_handle =
+        match s.ty.as_ref() {
+            Type::Path(tp) if tp.qself.is_none() => tp.path.segments.last().is_some_and(|seg| {
+                matches!(seg.ident.to_string().as_str(), "texture_2d" | "sampler")
+            }),
+            _ => false,
+        };
     // 地址空间三选一: handle(无)/ storage(...)/ uniform
     let addr = match (&storage_attr, is_handle) {
         (Some(_), true) => {
@@ -820,6 +820,69 @@ macro_rules! passthrough {
 }
 
 passthrough!(
-    group, binding, vertex, fragment, compute, workgroup_size, builtin, location, interpolate,
+    group,
+    binding,
+    vertex,
+    fragment,
+    compute,
+    workgroup_size,
+    builtin,
+    location,
+    interpolate,
     storage
 );
+
+
+#[proc_macro_derive(ConstDefault)]
+pub fn derive_const_default(input: TokenStream) -> TokenStream {
+    let ast = parse_macro_input!(input as syn::DeriveInput);
+    let struct_name = &ast.ident;
+    
+    // 获取泛型参数并添加约束
+    let mut generics = ast.generics.clone();
+    for param in &mut generics.params {
+        if let syn::GenericParam::Type(type_param) = param {
+            type_param.bounds.push(syn::parse_quote!(ConstDefault));
+        }
+    }
+    
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    
+    // 根据字段类型生成不同的初始化代码
+    let field_inits = match &ast.data {
+        syn::Data::Struct(data) => {
+            match &data.fields {
+                // ✅ 处理命名字段：struct S { field: T }
+                syn::Fields::Named(fields) => {
+                    let inits = fields.named.iter().map(|f| {
+                        let name = &f.ident;
+                        quote! { #name: ConstDefault::DEFAULT }
+                    });
+                    quote! { #(#inits),* }
+                }
+                // ✅ 处理未命名字段：struct S(T, U)
+                syn::Fields::Unnamed(fields) => {
+                    let inits = fields.unnamed.iter().map(|_| {
+                        quote! { ConstDefault::DEFAULT }
+                    });
+                    quote! { #(#inits),* }
+                }
+                // ✅ 处理单元结构体：struct S;
+                syn::Fields::Unit => {
+                    quote! {}
+                }
+            }
+        }
+        _ => unimplemented!("只支持结构体"),
+    };
+    
+    let expanded = quote! {
+        impl #impl_generics ConstDefault for #struct_name #ty_generics #where_clause {
+            const DEFAULT: Self = Self(#field_inits);
+            // 对于元组结构体，使用 Self(字段1, 字段2, ...)
+            // 对于命名字段，使用 Self { 字段1, 字段2, ... }
+        }
+    };
+    
+    expanded.into()
+}
