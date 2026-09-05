@@ -6,10 +6,11 @@ edition = "2021"
 [dependencies]
 gpu = { path = "gpu" }
 gpu-macro = { path = "gpu-macro" }
+wgsl-macro = { path = "wgsl-macro" }
 
-# 根包 + 两个子 crate 组成一个 workspace(根包自动是成员)
+# 根包 + 子 crate 组成一个 workspace(根包自动是成员)
 [workspace]
-members = ["gpu", "gpu-macro"]
+members = ["gpu", "gpu-macro", "wgsl-macro"]
 
 [dev-dependencies]
 naga = { version = "30.0.1", features = ["wgsl-in"] }
