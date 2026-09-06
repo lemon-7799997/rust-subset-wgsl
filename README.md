@@ -152,12 +152,13 @@ fn vs_main(#[builtin(vertex_index)] vid: u32) -> VsOut {
 | `a + b` 等二元/一元 | 同(自动加括号) | `-`、`!` 支持 |
 | `vec2::<f32>(x, y)` | `vec2<f32>(x, y)` | **turbofish 的 `::` 被吃掉**,元素类型显式写在代码里(翻译器不用猜) |
 | `mat4x4::<f32>(16 个标量,列主序)` | `mat4x4<f32>(...)` | 同上,矩阵构造器 |
+| `mat2x2::<f32>(4)` / `mat3x3::<f32>(9)` | 同 | 同上;`mat×mat`/`mat×vec` 桩库运算符齐全 |
 | `u_cam.view_proj * pos4` | 同 | `mat4x4 × vec4`(桩库运算符,含 struct 字段访问) |
 | `f32(vid)`(Rust 写 `vid as f32`) | `f32(vid)` | `as` 转换 → WGSL 转换构造器 |
 | `p.x` | `p.x` | 字段访问(桩库字段名 = WGSL 名) |
 | `arr[i]` | `arr[i]` | 索引 |
 | `clamp(d, 0.0, 1.0)` 等 | 同 | 桩库数学函数,1:1 透传 |
-| `textureSample(tex, smp, uv)` 等 | 同 | 桩库纹理函数(`textureSample` / `textureLoad` / `textureDimensions`),1:1 透传 |
+| `textureSample(tex, smp, uv)` / `texture_sample_cube(...)` 等 | 同(改名表映射) | **Rust 无重载**:同名不同签名的 WGSL 内建拆成不同 Rust 名,翻译时映射回 `textureSample`/`textureSampleCompare`/`textureLoad` 等 |
 | `VsOut { a: x, b: y }` | `VsOut(x, y)` | 见 struct 构造 |
 
 ### 7. 类型
@@ -165,9 +166,10 @@ fn vs_main(#[builtin(vertex_index)] vid: u32) -> VsOut {
 - 标量 `f32` / `i32` / `u32`(Rust 原生类型,1:1)
 - `vec2<T>` / `vec3<T>` / `vec4<T>`(桩库泛型结构体,尖括号语法两边一致)
 - `mat4x4<T>`(列主序真容器:4 个 `vec4` 列 + `×vec4` 运算)
+- `mat2x2<T>` / `mat3x3<T>`(补齐矩阵家族:`mat×vec` + `mat×mat`)
 - `array<T>`(runtime 数组形态,用于 storage buffer 成员;内部是"假容器",Index 忽略下标只为过类型检查)
 - 模块内自定义 `struct`(不能泛型)
-- **handle 类型**:`texture_2d<T>`、`sampler`。模块级声明**没有地址空间**:
+- **handle 类型**:`texture_2d<T>` / `texture_2d_array<T>` / `texture_cube<T>` / `texture_depth_2d` / `sampler` / `sampler_comparison`。模块级声明**没有地址空间**:
 
 ```rust
 // Rust                                     // WGSL
@@ -225,7 +227,7 @@ gpu-macro = { path = "..", default-features = false }
 - **只做 WGSL 标准语法**;标准没有的语法在翻译时报错并指向源码位置。
 - **三层护栏**:rustc 类型检查(重放副本)+ 宏展开期 naga 自校验(默认开)+ 演示单测的 naga 校验。
 - **暂未实现(备选方向,以后再说)**:模块声明顺序的自动检查/调整(struct/static 目前按源顺序输出、const 自动提前)、binding 号/变量名冲突检测、重复绑定检查。设计初衷是"rust 风味的 WGSL 编写体验":用户代码以 WGSL 正确性为优先,翻译器保证生成的 WGSL 合法(rustc 类型检查 + 宏内 naga 自校验);这类"替你纠错"的兜底检查不是优先项,需要时再加。
-- 现状:uniform / storage(读写)/ texture / sampler 模块级声明、模块级 const、`mat4x4<T>`、`array<T>`(storage 用)、struct、属性映射、if/else、loop/while/for、break/continue/return、unsafe 透明(块/fn)、多入口(vs+fs+compute)、构造器/cast/纹理函数透传、矩阵×向量都有;UBO 布局属性(@size/@align)已支持;更多矩阵(2x2/3x3)与纹理类型、定长/字面量数组还没做。
+- 现状:uniform / storage(读写)/ texture / sampler 模块级声明、模块级 const、`mat4x4<T>`、`array<T>`(storage 用)、struct、属性映射、if/else、loop/while/for、break/continue/return、unsafe 透明(块/fn)、多入口(vs+fs+compute)、构造器/cast/纹理函数透传、矩阵×向量都有;UBO 布局属性(@size/@align)、矩阵家族(mat2x2/3x3/4x4,mat×vec/mat×mat)、纹理家族(cube/2d_array/depth + compare 采样器)都有;定长/字面量数组、mat×vec 之外的更多内建重载还没做。
 
 ## 已知取舍
 

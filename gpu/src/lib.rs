@@ -223,7 +223,7 @@ pub fn refract<T>(i: T, n: T, eta: f32) -> T {
 // WGSL 里它们声明在模块级,但没有地址空间(不是 var<uniform>/<storage>):
 //   @group(0) @binding(1) var tex: texture_2d<f32>;
 //   @group(0) @binding(2) var smp: sampler;
-// 翻译器看到 texture_2d / sampler 类型时会跳过地址空间部分。
+// 翻译器看到这些 handle 类型时会跳过地址空间部分。
 // ============================================================================
 
 /// 2D 纹理(handle)。`new()` 只用于 Rust 侧 static 初始化,翻译时初值被丢弃。
@@ -237,18 +237,95 @@ impl<T> texture_2d<T> {
     }
 }
 
+/// 2D 纹理数组(handle,按 array_index 采样)。
+#[derive(Clone, Copy, gpu_macro::ConstDefault)]
+pub struct texture_2d_array<T>(PhantomData<T>);
+
+impl<T> texture_2d_array<T> {
+    #[inline]
+    pub const fn new() -> Self {
+        texture_2d_array(PhantomData)
+    }
+}
+
+/// 立方体纹理(handle,按 vec3 方向采样)。
+#[derive(Clone, Copy, gpu_macro::ConstDefault)]
+pub struct texture_cube<T>(PhantomData<T>);
+
+impl<T> texture_cube<T> {
+    #[inline]
+    pub const fn new() -> Self {
+        texture_cube(PhantomData)
+    }
+}
+
+/// 深度纹理(handle,无格式参数)。
+#[derive(Clone, Copy, gpu_macro::ConstDefault)]
+pub struct texture_depth_2d(PhantomData<f32>);
+
+impl texture_depth_2d {
+    #[inline]
+    pub const fn new() -> Self {
+        texture_depth_2d(PhantomData)
+    }
+}
+
 /// 采样器(handle)。unit struct,值就是它自己。
 #[derive(Clone, Copy, gpu_macro::ConstDefault)]
 pub struct sampler;
 
-// ---- 常用纹理函数(no-op 桩,1:1 透传) ----
+/// 比较采样器(handle,配 depth 纹理做 shadow 采样)。
+#[derive(Clone, Copy, gpu_macro::ConstDefault)]
+pub struct sampler_comparison;
+
+// ---- 常用纹理函数(no-op 桩) ----
+//
+// 注意: WGSL 的 textureSample/textureLoad/textureDimensions 是按参数类型
+// 重载的;Rust 没有重载 → 同 WGSL 名的不同签名必须拆成不同 Rust 名
+// (texture_sample_cube / texture_sample_array / ...),翻译器按改名表把它们
+// 映射回 WGSL 名(见 gpu-macro 里 map_wgsl_name)。
 
 pub fn textureSample<T>(t: texture_2d<T>, s: sampler, uv: vec2<f32>) -> vec4<f32> {
     let _ = (t, s, uv);
     unimplemented!("no-op stub: only for type checking")
 }
 
+pub fn texture_sample_cube<T>(t: texture_cube<T>, s: sampler, uvw: vec3<f32>) -> vec4<f32> {
+    let _ = (t, s, uvw);
+    unimplemented!("no-op stub: only for type checking")
+}
+
+pub fn texture_sample_array<T>(
+    t: texture_2d_array<T>,
+    s: sampler,
+    uv: vec2<f32>,
+    layer: i32,
+) -> vec4<f32> {
+    let _ = (t, s, uv, layer);
+    unimplemented!("no-op stub: only for type checking")
+}
+
+pub fn texture_sample_depth(t: texture_depth_2d, s: sampler, uv: vec2<f32>) -> f32 {
+    let _ = (t, s, uv);
+    unimplemented!("no-op stub: only for type checking")
+}
+
+pub fn texture_sample_compare(
+    t: texture_depth_2d,
+    s: sampler_comparison,
+    uv: vec2<f32>,
+    depth_ref: f32,
+) -> f32 {
+    let _ = (t, s, uv, depth_ref);
+    unimplemented!("no-op stub: only for type checking")
+}
+
 pub fn textureLoad<T>(t: texture_2d<T>, coords: vec2<i32>, level: i32) -> vec4<f32> {
+    let _ = (t, coords, level);
+    unimplemented!("no-op stub: only for type checking")
+}
+
+pub fn texture_load_cube<T>(t: texture_cube<T>, coords: vec3<i32>, level: i32) -> vec4<f32> {
     let _ = (t, coords, level);
     unimplemented!("no-op stub: only for type checking")
 }
@@ -258,11 +335,16 @@ pub fn textureDimensions<T>(t: texture_2d<T>, level: i32) -> vec2<u32> {
     unimplemented!("no-op stub: only for type checking")
 }
 
+pub fn texture_dimensions_array<T>(t: texture_2d_array<T>, level: i32) -> vec2<u32> {
+    let _ = (t, level);
+    unimplemented!("no-op stub: only for type checking")
+}
+
 // ============================================================================
-// array<T>:真容器(桩库规则:只实现"必须的功能")
-// 存真实元素、支持下标读写(usize + u32)——没有这些重放副本就没法通过
-// rustc 类型检查。WGSL 里数组下标是 u32/i32,所以直接支持 u32 下标,
-// 让 Rust 侧写法和 WGSL 源一致。数学类内建仍保持 no-op。
+// array<T>:假容器(桩库规则:只实现"必须的功能")
+// 只放一个 phantom 元素,Index/IndexMut 忽略下标——目的纯粹是让重放副本
+// 能过 rustc 类型检查;真正的数组是 WGSL 侧的 storage buffer 成员。
+// WGSL 数组下标是 u32/i32,所以支持 usize/u32 下标,让源写法贴近 WGSL。
 // ============================================================================
 
 pub trait ConstDefault {
@@ -392,6 +474,109 @@ impl<T: Copy + Add<Output = T> + Mul<Output = T>> Mul<vec4<T>> for mat4x4<T> {
             y: self.c0.y * v.x + self.c1.y * v.y + self.c2.y * v.z + self.c3.y * v.w,
             z: self.c0.z * v.x + self.c1.z * v.y + self.c2.z * v.z + self.c3.z * v.w,
             w: self.c0.w * v.x + self.c1.w * v.y + self.c2.w * v.z + self.c3.w * v.w,
+        }
+    }
+}
+
+// ============================================================================
+// mat2x2<T> / mat3x3<T>(补齐矩阵家族,mat4x4 在上方)
+// 列主序真容器:构造器标量个数 = N*N;支持 矩阵×向量 与 矩阵×矩阵。
+// ============================================================================
+
+#[derive(Clone, Copy, Debug, PartialEq, gpu_macro::ConstDefault)]
+pub struct mat2x2<T> {
+    pub c0: vec2<T>,
+    pub c1: vec2<T>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, gpu_macro::ConstDefault)]
+pub struct mat3x3<T> {
+    pub c0: vec3<T>,
+    pub c1: vec3<T>,
+    pub c2: vec3<T>,
+}
+
+/// WGSL mat2x2<f32>(...) 构造器(4 个标量,列主序)。
+#[inline]
+pub const fn mat2x2<T>(a0: T, a1: T, a2: T, a3: T) -> mat2x2<T> {
+    mat2x2 {
+        c0: vec2::<T>(a0, a1),
+        c1: vec2::<T>(a2, a3),
+    }
+}
+
+/// WGSL mat3x3<f32>(...) 构造器(9 个标量,列主序)。
+#[inline]
+pub const fn mat3x3<T>(
+    a0: T, a1: T, a2: T, //
+    a3: T, a4: T, a5: T, //
+    a6: T, a7: T, a8: T, //
+) -> mat3x3<T> {
+    mat3x3 {
+        c0: vec3::<T>(a0, a1, a2),
+        c1: vec3::<T>(a3, a4, a5),
+        c2: vec3::<T>(a6, a7, a8),
+    }
+}
+
+// mat2x2 × vec2
+impl<T: Copy + Add<Output = T> + Mul<Output = T>> Mul<vec2<T>> for mat2x2<T> {
+    type Output = vec2<T>;
+    #[inline]
+    fn mul(self, v: vec2<T>) -> vec2<T> {
+        vec2 {
+            x: self.c0.x * v.x + self.c1.x * v.y,
+            y: self.c0.y * v.x + self.c1.y * v.y,
+        }
+    }
+}
+
+// mat3x3 × vec3
+impl<T: Copy + Add<Output = T> + Mul<Output = T>> Mul<vec3<T>> for mat3x3<T> {
+    type Output = vec3<T>;
+    #[inline]
+    fn mul(self, v: vec3<T>) -> vec3<T> {
+        vec3 {
+            x: self.c0.x * v.x + self.c1.x * v.y + self.c2.x * v.z,
+            y: self.c0.y * v.x + self.c1.y * v.y + self.c2.y * v.z,
+            z: self.c0.z * v.x + self.c1.z * v.y + self.c2.z * v.z,
+        }
+    }
+}
+
+// 矩阵 × 矩阵(列主序:(A*B) 的第 j 列 = A * B 的第 j 列)
+impl<T: Copy + Add<Output = T> + Mul<Output = T>> Mul for mat2x2<T> {
+    type Output = Self;
+    #[inline]
+    fn mul(self, o: Self) -> Self {
+        mat2x2 {
+            c0: self * o.c0,
+            c1: self * o.c1,
+        }
+    }
+}
+
+impl<T: Copy + Add<Output = T> + Mul<Output = T>> Mul for mat3x3<T> {
+    type Output = Self;
+    #[inline]
+    fn mul(self, o: Self) -> Self {
+        mat3x3 {
+            c0: self * o.c0,
+            c1: self * o.c1,
+            c2: self * o.c2,
+        }
+    }
+}
+
+impl<T: Copy + Add<Output = T> + Mul<Output = T>> Mul for mat4x4<T> {
+    type Output = Self;
+    #[inline]
+    fn mul(self, o: Self) -> Self {
+        mat4x4 {
+            c0: self * o.c0,
+            c1: self * o.c1,
+            c2: self * o.c2,
+            c3: self * o.c3,
         }
     }
 }

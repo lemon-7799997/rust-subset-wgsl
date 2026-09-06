@@ -101,6 +101,20 @@ fn path_last(path: &syn::Path) -> String {
         .unwrap_or_default()
 }
 
+/// Rust 没有函数重载:WGSL 里同名、不同签名的内建(如 textureSample 家族)
+/// 在桩库里拆成了不同 Rust 名,这里映射回 WGSL 名。
+fn map_wgsl_name(rust_name: &str) -> &str {
+    match rust_name {
+        "texture_sample_cube" | "texture_sample_array" | "texture_sample_depth" => {
+            "textureSample"
+        }
+        "texture_sample_compare" => "textureSampleCompare",
+        "texture_load_cube" => "textureLoad",
+        "texture_dimensions_array" => "textureDimensions",
+        other => other,
+    }
+}
+
 fn print_generic_arg(arg: &GenericArgument) -> Result<String, syn::Error> {
     match arg {
         GenericArgument::Type(t) => print_type(t),
@@ -194,7 +208,9 @@ impl Ctx<'_> {
                         return Ok(format!("{name}<{tys}>({args})"));
                     }
                 }
-                Ok(format!("{name}({args})"))
+                // 无 turbofish → 普通函数调用;按改名表映射回 WGSL 名
+                let wgsl_name = map_wgsl_name(&name);
+                Ok(format!("{wgsl_name}({args})"))
             }
             Expr::Binary(b) => {
                 let op = b.op.to_token_stream().to_string();
@@ -636,7 +652,15 @@ fn trans_static(s: &ItemStatic) -> Result<String, syn::Error> {
     let is_handle =
         match s.ty.as_ref() {
             Type::Path(tp) if tp.qself.is_none() => tp.path.segments.last().is_some_and(|seg| {
-                matches!(seg.ident.to_string().as_str(), "texture_2d" | "sampler")
+                matches!(
+                    seg.ident.to_string().as_str(),
+                    "texture_2d"
+                        | "texture_2d_array"
+                        | "texture_cube"
+                        | "texture_depth_2d"
+                        | "sampler"
+                        | "sampler_comparison"
+                )
             }),
             _ => false,
         };

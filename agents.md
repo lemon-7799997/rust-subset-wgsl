@@ -11,7 +11,7 @@
 | 路径 | 内容 | 改它之前要知道 |
 |---|---|---|
 | `src/main.rs` | 演示 shader + naga 校验单测 | 演示 mod 就是翻译器的"回归测试集",扩展语法时应同步扩展它 |
-| `gpu/` | 桩库(vec2/3/4<T>、mat4x4<T>、array<T>、texture/sampler、`ConstDefault` trait + 原生类型 impl、数学函数) | **规则:只实现"必须的功能"**(类型字段/容器/下标/运算符要真实,否则重放副本过不了 rustc);WGSL 数学/纹理内建保持 `unimplemented!()` |
+| `gpu/` | 桩库(vec2/3/4<T>、mat2x2/3x3/4x4<T>、array<T>、纹理/采样器 handle 家族、`ConstDefault` trait + 原生类型 impl、数学函数) | **规则:只实现"必须的功能"**(类型字段/容器/下标/运算符要真实,否则重放副本过不了 rustc);WGSL 数学/纹理内建保持 `unimplemented!()` |
 | `gpu-macro/` | proc-macro:`#[shader]` 翻译器、透传属性宏、`ConstDefault` derive | 翻译逻辑都在这;`ConstDefault` 的 **trait 在 gpu**、**derive 在 gpu-macro**,使用处两者都要引入(derive 生成的是不带路径的 `impl ConstDefault`,trait 必须在作用域里) |
 
 ## 命令
@@ -26,7 +26,7 @@ cargo check -p gpu-macro   # 只查宏 crate
 
 ## 不可破坏的规则(invariants)
 
-1. **桩库只实现"必须的功能"**。类型字段、容器/下标、运算符语义必须真实——重放副本要过 rustc,凭空返回 `&T` 之类是过不去的;但 WGSL **数学/纹理内建函数保持 `unimplemented!()`**(CPU 上永不执行 shader)。给桩库加语义前想清楚"是不是不加就 typecheck 不过"。当前例外:vec/mat4x4 有真实字段与运算、`array<T>` 是"假容器"(单元素 phantom,Index 忽略下标,仅 typecheck)。
+1. **桩库只实现"必须的功能"**。类型字段、容器/下标、运算符语义必须真实——重放副本要过 rustc,凭空返回 `&T` 之类是过不去的;但 WGSL **数学/纹理内建函数保持 `unimplemented!()`**(CPU 上永不执行 shader)。给桩库加语义前想清楚"是不是不加就 typecheck 不过"。当前例外:vec 与 mat2x2/3x3/4x4 有真实字段与运算(mat×vec/mat×mat)、`array<T>` 是"假容器"(单元素 phantom,Index 忽略下标,仅 typecheck)。
 2. **只输出 WGSL 标准里有的语法**。Rust 有但 WGSL 没有的(match、if 当表达式、引用、泛型 struct……)→ 翻译时报 `syn::Error`(带源码 span),**绝不静默跳过或伪造翻译**。
 3. **单一来源**:shader 只写一遍。rustc 类型检查靠宏"重放剥掉装饰属性的原代码"完成;任何新装饰属性必须同时处理 `strip_*`(剥掉),否则重放副本编译失败。
 4. **错误信息用中文**,通过 `err(node, "...")` / `syn::Error::new_spanned` 产生,span 指向出问题的源码节点。
@@ -41,9 +41,10 @@ cargo check -p gpu-macro   # 只查宏 crate
   - `Ctx.field_order`:模块内 struct 名 → 成员声明顺序(Rust 命名字面量 → WGSL 位置构造器靠它);
   - `print_expr` / `print_stmt` / `print_block` / `print_if_stmt` / `render_loop_body` / `print_for`:表达式与语句递归打印;
   - `trans_fn`:入口/普通函数(参数装饰、返回值装饰、函数体)。
-- **模块级**:`trans_static`(static 上只允许 group/binding/storage,**其他装饰如 `#[align]` 会被拒绝**;值类型 → var<uniform>;**texture_2d/sampler 等 handle 类型不加地址空间**;**`#[storage]` / `#[storage(read_write)]` → `<storage>` / `<storage, read_write>`**,可写 buffer 用 `static mut` + `unsafe`)、`trans_struct`、`trans_const`(模块级 const → WGSL const)、`trans_module`(先收集 field_order;再把 **const 整体提前输出**——WGSL 要求先声明后使用)。
+- **模块级**:`trans_static`(static 上只允许 group/binding/storage,**其他装饰如 `#[align]` 会被拒绝**;值类型 → var<uniform>;**texture_2d/cube/2d_array/depth 等 handle 类型与 sampler/sampler_comparison 不加地址空间**;**`#[storage]` / `#[storage(read_write)]` → `<storage>` / `<storage, read_write>`**,可写 buffer 用 `static mut` + `unsafe`)、`trans_struct`、`trans_const`(模块级 const → WGSL const)、`trans_module`(先收集 field_order;再把 **const 整体提前输出**——WGSL 要求先声明后使用)。
 - **`unsafe`**:`unsafe fn` 与 `unsafe {}` 块都是 Rust-only(写 `static mut` 的必要手段),翻译时**透明剥掉**;块当表达式用会报错。对应宏在重放 mod 上加的 allow 含 `static_mut_refs`。
 - **宏入口 `shader`**:翻译(出错则直接返回编译错误)→ 剥装饰 → 重放 + `pub const WGSL`。文件底部还有一组**透传属性宏**(展开 = 原样返回),让装饰属性在 `#[shader]` 外也不报错。
+- **改名表 `map_wgsl_name`**:Rust 没有函数重载 → WGSL 同名不同签名的内建在桩库拆成不同 Rust 名(texture_sample_cube/array/depth → `textureSample`、texture_sample_compare → `textureSampleCompare`、texture_load_cube → `textureLoad`、texture_dimensions_array → `textureDimensions`)。给这类函数加桩时记得同时扩表。
 - **turbofish 规则**:`vec2::<f32>(..)` → `vec2<f32>(..)`(吃掉 `::`);syn 里泛型参数在 path 的 `AngleBracketed` 里,显式可读,翻译器不需要类型推断。
 
 ## 加一种语法的标准动作(清单)

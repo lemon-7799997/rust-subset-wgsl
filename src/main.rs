@@ -109,6 +109,27 @@ mod triangle {
         tint: vec3::<f32>(0.0, 0.0, 0.0),
     };
 
+    // 纹理家族:cube / 2d_array / depth + compare 采样器(handle,无地址空间)
+    #[allow(non_upper_case_globals)]
+    #[group(0)]
+    #[binding(6)]
+    static tex_cube: texture_cube<f32> = ConstDefault::DEFAULT;
+
+    #[allow(non_upper_case_globals)]
+    #[group(0)]
+    #[binding(7)]
+    static tex_arr: texture_2d_array<f32> = ConstDefault::DEFAULT;
+
+    #[allow(non_upper_case_globals)]
+    #[group(0)]
+    #[binding(8)]
+    static depth_tex: texture_depth_2d = ConstDefault::DEFAULT;
+
+    #[allow(non_upper_case_globals)]
+    #[group(0)]
+    #[binding(9)]
+    static smp_cmp: sampler_comparison = ConstDefault::DEFAULT;
+
     #[vertex]
     fn vs_main(#[builtin(vertex_index)] vid: u32) -> VsOut {
         // let mut -> var;  `vid as f32` -> `f32(vid)`
@@ -167,18 +188,42 @@ mod triangle {
     #[fragment]
     #[location(0)]
     fn fs_main(#[location(0)] uv: vec2<f32>) -> vec4<f32> {
-        // 纹理采样 × uniform 颜色,再做伽马校正(模块级 const GAMMA)
+        // 2D 采样 × uniform 颜色
         let c = textureSample(tex, smp, uv) * u_color;
-        return pow(c, vec4::<f32>(GAMMA, GAMMA, GAMMA, 1.0));
+        // 纹理家族:cube / 2d_array / depth+compare(Rust 名 → WGSL 名走改名表)
+        let env = texture_sample_cube(tex_cube, smp, vec3::<f32>(uv.x, uv.y, 1.0));
+        let arr = texture_sample_array(tex_arr, smp, uv, 0);
+        let sh = texture_sample_compare(depth_tex, smp_cmp, uv, 0.5);
+        let lit = c * env * arr * vec4::<f32>(sh, sh, sh, 1.0);
+        return pow(lit, vec4::<f32>(GAMMA, GAMMA, GAMMA, 1.0));
+    }
+
+    // 非入口辅助函数:同样会被翻译并校验(mat3x3 构造、矩阵×矩阵、矩阵×向量)
+    fn transform_tangent(p: vec3<f32>) -> vec3<f32> {
+        let basis = mat3x3::<f32>(
+            1.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, //
+            0.0, 0.0, 1.0, //
+        );
+        let rot = mat3x3::<f32>(
+            0.0, -1.0, 0.0, //
+            1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, //
+        );
+        return (basis * rot) * p; // 矩阵×矩阵 再 矩阵×向量
     }
 
     // compute 入口:写 storage buffer(Rust 侧 static mut 要 unsafe,
-    // 翻译时 unsafe 块透明展开成普通语句)
+    // 翻译时 unsafe 透明剥掉)
     #[compute]
     #[workgroup_size(8)]
     unsafe fn cs_main(#[builtin(global_invocation_id)] gid: vec3<u32>) {
         let i = gid.x; // u32 下标直接可用(桩库 array 实现了 Index<u32>)
-        buf.pos[i] = vec4::<f32>(i as f32 * u_scale, 0.0, 0.0, 1.0);
+        // mat2x2 旋转(u_scale 当角度),顺带覆盖 mat2x2 × vec2 与 cos/sin
+        let ang = u_scale;
+        let rot = mat2x2::<f32>(cos(ang), sin(ang), -sin(ang), cos(ang));
+        let p2 = rot * vec2::<f32>(i as f32, 0.0);
+        buf.pos[i] = vec4::<f32>(p2.x, p2.y, 0.0, 1.0);
     }
 }
 
