@@ -37,7 +37,7 @@ use gpu_macro::shader;
 #[shader]
 mod triangle {
     // 类型/函数都来自 gpu 桩库 → 这行编译后 rustc 会真检查下面所有类型
-    use gpu::*;
+    use gpu::{textureLoad, *};
     use gpu_macro::ConstDefault;
 
     // 模块级 const → WGSL const(翻译时自动挪到模块最前,先声明后使用)
@@ -130,6 +130,11 @@ mod triangle {
     #[binding(9)]
     static smp_cmp: sampler_comparison = ConstDefault::DEFAULT;
 
+    #[allow(non_upper_case_globals)]
+    #[group(0)]
+    #[binding(10)]
+    static tex_1d: texture_1d<f32> = ConstDefault::DEFAULT;
+
     #[vertex]
     fn vs_main(#[builtin(vertex_index)] vid: u32) -> VsOut {
         // let mut -> var;  `vid as f32` -> `f32(vid)`
@@ -211,6 +216,15 @@ mod triangle {
             0.0, 0.0, 1.0, //
         );
         return (basis * rot) * p; // 矩阵×矩阵 再 矩阵×向量
+    }
+
+    // 元组+trait 重载模拟实验(textureLoad 接收整包元组,三种签名):
+    // Rust 写 textureLoad((tex, coord, level)),翻译成 WGSL textureLoad(...)
+    fn probe_load(coord: vec2<i32>, level: i32, layer: i32) -> f32 {
+        let a = textureLoad((tex, coord, level)); // texture_2d<f32>, vec2<i32>, i32
+        let b = textureLoad((tex_arr, coord, layer, level)); // 2d_array 多一层
+        let c = textureLoad((tex_1d, coord.x, level)); // texture_1d, i32, i32
+        return a.x + b.x + c.x;
     }
 
     // compute 入口:写 storage buffer(Rust 侧 static mut 要 unsafe,

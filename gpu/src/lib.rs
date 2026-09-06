@@ -259,6 +259,17 @@ impl<T> texture_cube<T> {
     }
 }
 
+/// 1D 纹理(handle)。
+#[derive(Clone, Copy, gpu_macro::ConstDefault)]
+pub struct texture_1d<T>(PhantomData<T>);
+
+impl<T> texture_1d<T> {
+    #[inline]
+    pub const fn new() -> Self {
+        texture_1d(PhantomData)
+    }
+}
+
 /// 深度纹理(handle,无格式参数)。
 #[derive(Clone, Copy, gpu_macro::ConstDefault)]
 pub struct texture_depth_2d(PhantomData<f32>);
@@ -317,11 +328,6 @@ pub fn texture_sample_compare(
     depth_ref: f32,
 ) -> f32 {
     let _ = (t, s, uv, depth_ref);
-    unimplemented!("no-op stub: only for type checking")
-}
-
-pub fn textureLoad<T>(t: texture_2d<T>, coords: vec2<i32>, level: i32) -> vec4<f32> {
-    let _ = (t, coords, level);
     unimplemented!("no-op stub: only for type checking")
 }
 
@@ -579,4 +585,58 @@ impl<T: Copy + Add<Output = T> + Mul<Output = T>> Mul for mat4x4<T> {
             c3: self * o.c3,
         }
     }
+}
+
+// ============================================================================
+// 实验 v2:用「自由函数接收元组 + trait 分发」模拟函数重载
+// ============================================================================
+// WGSL 的 textureLoad 按纹理类型有多个签名,而 Rust 没有函数重载。
+// 这里让 textureLoad 整体接收一个元组,trait 按元组形状选实现:
+//
+//   textureLoad((texture_1d<ST>,       C,        L))
+//   textureLoad((texture_2d<ST>,       vec2<C>,  L))
+//   textureLoad((texture_2d_array<ST>, vec2<C>,  A, L))
+//
+// 调用点写法与 WGSL 名完全一致(只是参数变成"一整包元组");
+// rustc 靠 A: TextureLoad 约束检查元组形状/类型;
+// 翻译器(gpu-macro)看到 textureLoad((…)) 会把元组摊平成 textureLoad(…)。
+// ============================================================================
+
+pub trait TextureLoad {
+    /// 每个签名自己的返回类型(纹理元素类型 ST 决定 vec4<ST>)。
+    type Output;
+    fn load(self) -> Self::Output;
+}
+
+impl<ST, C, L> TextureLoad for (texture_1d<ST>, C, L) {
+    type Output = vec4<ST>;
+    #[inline]
+    fn load(self) -> vec4<ST> {
+        let _ = self;
+        unimplemented!("no-op stub: only for type checking")
+    }
+}
+
+impl<ST, C, L> TextureLoad for (texture_2d<ST>, vec2<C>, L) {
+    type Output = vec4<ST>;
+    #[inline]
+    fn load(self) -> vec4<ST> {
+        let _ = self;
+        unimplemented!("no-op stub: only for type checking")
+    }
+}
+
+impl<ST, A, C, L> TextureLoad for (texture_2d_array<ST>, vec2<C>, A, L) {
+    type Output = vec4<ST>;
+    #[inline]
+    fn load(self) -> vec4<ST> {
+        let _ = self;
+        unimplemented!("no-op stub: only for type checking")
+    }
+}
+
+/// 重载模拟入口:整体接收一个参数元组,rustc 按元组形状挑 impl。
+#[inline]
+pub fn textureLoad<A: TextureLoad>(args: A) -> A::Output {
+    args.load()
 }

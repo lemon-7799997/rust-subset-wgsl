@@ -189,13 +189,32 @@ impl Ctx<'_> {
                     Expr::Path(p) => p,
                     other => return Err(err(other, "调用目标必须是函数名/类型构造器")),
                 };
+                let name = path_last(&func.path);
+                // 「自由函数接收元组」重载模拟:
+                // textureLoad((tex, coords[, layer], level)) → WGSL textureLoad(tex, ...)
+                if name == "textureLoad" {
+                    if call.args.len() == 1 {
+                        if let Expr::Tuple(t) = &call.args[0] {
+                            let inner = t
+                                .elems
+                                .iter()
+                                .map(|e| self.print_expr(e))
+                                .collect::<Result<Vec<_>, _>>()?
+                                .join(", ");
+                            return Ok(format!("textureLoad({inner})"));
+                        }
+                    }
+                    return Err(syn::Error::new_spanned(
+                        call,
+                        "textureLoad 需要整体接收一个元组参数: textureLoad((纹理, 坐标[, 数组层], mip层))",
+                    ));
+                }
                 let args = call
                     .args
                     .iter()
                     .map(|a| self.print_expr(a))
                     .collect::<Result<Vec<_>, _>>()?
                     .join(", ");
-                let name = path_last(&func.path);
                 // 带 turbofish 泛型 → 类型构造器: vec2::<f32>(..) → vec2<f32>(..)
                 if let Some(seg) = func.path.segments.last() {
                     if let syn::PathArguments::AngleBracketed(ab) = &seg.arguments {
@@ -246,6 +265,10 @@ impl Ctx<'_> {
                 ))
             }
             Expr::Paren(p) => Ok(format!("({})", self.print_expr(&p.expr)?)),
+            Expr::MethodCall(m) => Err(syn::Error::new_spanned(
+                m,
+                "不支持方法调用;重载模拟请用「自由函数接收元组」: textureLoad((纹理, 坐标[, 层], mip层))",
+            )),
             Expr::Assign(a) => Ok(format!(
                 "{} = {}",
                 self.print_expr(&a.left)?,
@@ -654,7 +677,8 @@ fn trans_static(s: &ItemStatic) -> Result<String, syn::Error> {
             Type::Path(tp) if tp.qself.is_none() => tp.path.segments.last().is_some_and(|seg| {
                 matches!(
                     seg.ident.to_string().as_str(),
-                    "texture_2d"
+                    "texture_1d"
+                        | "texture_2d"
                         | "texture_2d_array"
                         | "texture_cube"
                         | "texture_depth_2d"

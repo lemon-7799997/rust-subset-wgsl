@@ -45,6 +45,7 @@ cargo check -p gpu-macro   # 只查宏 crate
 - **`unsafe`**:`unsafe fn` 与 `unsafe {}` 块都是 Rust-only(写 `static mut` 的必要手段),翻译时**透明剥掉**;块当表达式用会报错。对应宏在重放 mod 上加的 allow 含 `static_mut_refs`。
 - **宏入口 `shader`**:翻译(出错则直接返回编译错误)→ 剥装饰 → 重放 + `pub const WGSL`。文件底部还有一组**透传属性宏**(展开 = 原样返回),让装饰属性在 `#[shader]` 外也不报错。
 - **改名表 `map_wgsl_name`**:Rust 没有函数重载 → WGSL 同名不同签名的内建在桩库拆成不同 Rust 名(texture_sample_cube/array/depth → `textureSample`、texture_sample_compare → `textureSampleCompare`、texture_load_cube → `textureLoad`、texture_dimensions_array → `textureDimensions`)。给这类函数加桩时记得同时扩表。
+- **重载模拟(自由函数接收元组)**:`Expr::Call` 里 `textureLoad((…))`(单个元组参数)会被摊平成 WGSL `textureLoad(…)`(见 gpu 的 `TextureLoad` trait 与三个 impl,带关联类型 `Output = vec4<ST>`);缺参/错形会先在宏内被 naga 或 rustc 拦下。其他方法调用一律报错。注意元组里裸字面量在泛型位置可能推断不出类型,调用处用有类型的参数/变量。
 - **turbofish 规则**:`vec2::<f32>(..)` → `vec2<f32>(..)`(吃掉 `::`);syn 里泛型参数在 path 的 `AngleBracketed` 里,显式可读,翻译器不需要类型推断。
 
 ## 加一种语法的标准动作(清单)

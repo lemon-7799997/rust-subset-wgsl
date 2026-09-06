@@ -233,4 +233,5 @@ gpu-macro = { path = "..", default-features = false }
 
 - 二元表达式统一加括号输出(如 `(p.x * a)`),保证优先级正确、WGSL 合法,只是不够"漂亮"。
 - 数学函数桩签名故意很松(泛型不加约束),以后可用 trait 收紧,让明显错误的调用在 Rust 侧就报错。
+- **重载模拟(实验)**:Rust 无函数重载,WGSL 同名不同签名内建有两种处理:改名表(如 `texture_sample_cube` → `textureSample`)与「自由函数接收元组 + trait 分发」(见 `gpu` 的 `TextureLoad`:`textureLoad((tex, coords, level))` → WGSL `textureLoad(tex, coords, level)`)。trait 按元组形状选签名并约束参数类型,调用名与 WGSL 完全一致;代价是参数包了一层元组、裸字面量可能让推断卡住(建议用有类型的参数);两条路先都留着,看手感再收敛。
 - 桩库向量字段是 `pub`,`vec4 { x: .. }` 结构体字面量在 Rust 侧也"合法",但翻译器会把它当非法用法报错(请用 `vec4::<f32>(...)` 构造器)。
