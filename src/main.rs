@@ -1,38 +1,37 @@
 //! ============================================================================
-//! 尝试 #6 —— storage buffer + compute(桩库规则改为"只实现必须的功能"):
-//!   - `gpu` 桩库: vec2/3/4<T> + 数学函数(no-op)+ array<T,N>(真容器:
-//!     元素存储 + usize/u32 下标)+ texture_2d/sampler handle
-//!   - `gpu-macro` 的 #[shader]:
-//!       * static: uniform / #[storage(read_write)](static mut)/ handle
-//!       * unsafe 块透明展开(写 static mut 的 Rust-only 包装)
-//!       * struct、if/else、loop/while/for、break/continue/return、array 下标
-//!       * 三入口:@vertex + @fragment + @compute
-//!   - naga 单测: parse + Validator 完整校验
+//! 尝试 #7 —— 矩阵 + 相机 UBO + 模块级 const("MVP"真实案例):
+//!   - `gpu` 桩库: vec2/3/4<T>、mat4x4<T>(列主序真容器,×vec4)、
+//!     array<T>、texture/sampler handle、数学函数(no-op)
+//!   - `gpu-macro` 的 #[shader]: ... + 模块级 const(翻译时挪到 WGSL 最前,
+//!     因为 WGSL 要求先声明后使用)
+//!   - 三入口:@vertex + @fragment + @compute;naga 完整校验
 //! ============================================================================
 
 use gpu_macro::shader;
 
 // ---- 期望生成的 WGSL(翻译产物,节选) ----
+// const GAMMA: f32 = 2.2;                        // ← 模块级 const,自动排最前
+//
 // @group(0) @binding(0) var<uniform> u_scale: f32;
-// @group(0) @binding(1) var tex: texture_2d<f32>;       // handle: 无地址空间
+// @group(0) @binding(1) var tex: texture_2d<f32>;
 // @group(0) @binding(2) var smp: sampler;
 // @group(0) @binding(3) var<uniform> u_color: vec4<f32>;
 //
-// struct PositionBuffer {
-//     pos: array<vec4<f32>, 8>,
-// }
-//
+// struct PositionBuffer { pos: array<vec4<f32>>, }
 // @group(0) @binding(4) var<storage, read_write> buf: PositionBuffer;
+//
+// struct Camera { view_proj: mat4x4<f32>, }
+// @group(0) @binding(5) var<uniform> u_camera: Camera;
 //
 // struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> }
 //
-// @vertex fn vs_main(...) -> VsOut { ... }
-// @fragment fn fs_main(...) -> @location(0) vec4<f32> { ... }
+// @vertex fn vs_main(...) -> VsOut {
+//     ...
+//     return VsOut(u_camera.view_proj * vec4<f32>(p.x, p.y, 0.0, 1.0), p);
+// }
 //
-// @compute @workgroup_size(8)
-// fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
-//     let i = gid.x;
-//     buf.pos[i] = vec4<f32>(f32(i) * u_scale, 0.0, 0.0, 1.0);   // unsafe 块已透明
+// @fragment fn fs_main(...) -> @location(0) vec4<f32> {
+//     return pow(c * u_color, vec4<f32>(GAMMA, GAMMA, GAMMA, 1.0));  // 伽马
 // }
 
 #[shader]
@@ -40,6 +39,9 @@ mod triangle {
     // 类型/函数都来自 gpu 桩库 → 这行编译后 rustc 会真检查下面所有类型
     use gpu::*;
     use gpu_macro::ConstDefault;
+
+    // 模块级 const → WGSL const(翻译时自动挪到模块最前,先声明后使用)
+    const GAMMA: f32 = 2.2;
 
     // static + 属性 => WGSL 模块级 var(见上面的期望产物)
     // #[allow] 不是装饰属性,宏会保留它;WGSL 全局变量约定就是小写命名
@@ -85,6 +87,23 @@ mod triangle {
         uv: vec2<f32>,
     }
 
+    // 相机 UBO:uniform 里放 struct,struct 里放矩阵(默认布局即满足对齐)
+    struct Camera {
+        view_proj: mat4x4<f32>,
+    }
+
+    #[allow(non_upper_case_globals)]
+    #[group(0)]
+    #[binding(5)]
+    static u_camera: Camera = Camera {
+        view_proj: mat4x4::<f32>(
+            1.0, 0.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0, //
+            0.0, 0.0, 0.0, 1.0, //
+        ),
+    };
+
     #[vertex]
     fn vs_main(#[builtin(vertex_index)] vid: u32) -> VsOut {
         // let mut -> var;  `vid as f32` -> `f32(vid)`
@@ -129,9 +148,11 @@ mod triangle {
 
         let d = length(p); // 数学函数桩: length(vec) -> f32
         let a = clamp(d, 0.0, 1.0);
+        let pos4 = vec4::<f32>(p.x, p.y * a, 0.0, 1.0);
+        // MVP:先变换再输出(矩阵来自 Camera uniform,mat4x4 × vec4)
         // struct 字面量(按声明顺序)→ WGSL 位置构造器 VsOut(pos, uv)
         return VsOut {
-            pos: vec4::<f32>(p.x, p.y * a, 0.0, 1.0),
+            pos: u_camera.view_proj * pos4,
             uv: p,
         };
     }
@@ -141,9 +162,9 @@ mod triangle {
     #[fragment]
     #[location(0)]
     fn fs_main(#[location(0)] uv: vec2<f32>) -> vec4<f32> {
-        // 纹理采样 × uniform 颜色
-        let c = textureSample(tex, smp, uv);
-        return c * u_color;
+        // 纹理采样 × uniform 颜色,再做伽马校正(模块级 const GAMMA)
+        let c = textureSample(tex, smp, uv) * u_color;
+        return pow(c, vec4::<f32>(GAMMA, GAMMA, GAMMA, 1.0));
     }
 
     // compute 入口:写 storage buffer(Rust 侧 static mut 要 unsafe,

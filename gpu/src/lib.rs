@@ -351,3 +351,47 @@ impl ConstDefault for String {
 impl ConstDefault for &'static str {
     const DEFAULT: Self = "";
 }
+
+// ============================================================================
+// mat4x4<T>:4x4 矩阵(真容器,列主序,按"必须的功能"口径实现 矩阵×向量)
+// 字段 c0..c3 = 4 个列向量;构造器 16 个标量(列主序),翻译后就是 WGSL 的
+// mat4x4<f32>(...),参数顺序文本直通。
+// ============================================================================
+
+#[derive(Clone, Copy, Debug, PartialEq, gpu_macro::ConstDefault)]
+pub struct mat4x4<T> {
+    pub c0: vec4<T>,
+    pub c1: vec4<T>,
+    pub c2: vec4<T>,
+    pub c3: vec4<T>,
+}
+
+/// WGSL mat4x4<f32>(...) 构造器;Rust 侧写 mat4x4::<f32>(16 个标量)。
+#[inline]
+pub const fn mat4x4<T>(
+    a0: T, a1: T, a2: T, a3: T, //
+    a4: T, a5: T, a6: T, a7: T, //
+    a8: T, a9: T, a10: T, a11: T, //
+    a12: T, a13: T, a14: T, a15: T, //
+) -> mat4x4<T> {
+    mat4x4 {
+        c0: vec4::<T>(a0, a1, a2, a3),
+        c1: vec4::<T>(a4, a5, a6, a7),
+        c2: vec4::<T>(a8, a9, a10, a11),
+        c3: vec4::<T>(a12, a13, a14, a15),
+    }
+}
+
+// 矩阵 × 向量(列主序:M*v = Σ c_i * v_i)
+impl<T: Copy + Add<Output = T> + Mul<Output = T>> Mul<vec4<T>> for mat4x4<T> {
+    type Output = vec4<T>;
+    #[inline]
+    fn mul(self, v: vec4<T>) -> vec4<T> {
+        vec4 {
+            x: self.c0.x * v.x + self.c1.x * v.y + self.c2.x * v.z + self.c3.x * v.w,
+            y: self.c0.y * v.x + self.c1.y * v.y + self.c2.y * v.z + self.c3.y * v.w,
+            z: self.c0.z * v.x + self.c1.z * v.y + self.c2.z * v.z + self.c3.z * v.w,
+            w: self.c0.w * v.x + self.c1.w * v.y + self.c2.w * v.z + self.c3.w * v.w,
+        }
+    }
+}

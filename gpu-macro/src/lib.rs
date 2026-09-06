@@ -541,6 +541,14 @@ impl Ctx<'_> {
             format!("{sig} {{\n{body}\n}}")
         })
     }
+
+    /// 模块级 `const NAME: T = expr;` → WGSL `const NAME: T = expr;`。
+    /// 注意:WGSL 要求"先声明后使用",所以 const 会被整体挪到模块最前面输出。
+    fn trans_const(&self, c: &syn::ItemConst) -> Result<String, syn::Error> {
+        let ty = print_type(&c.ty)?;
+        let value = self.print_expr(&c.expr)?;
+        Ok(format!("const {}: {ty} = {value};", c.ident))
+    }
 }
 
 /// `#[storage]` / `#[storage(read)]` / `#[storage(read_write)]` → storage 访问模式。
@@ -699,9 +707,16 @@ fn trans_module(module: &ItemMod) -> Result<String, syn::Error> {
         field_order: &field_order,
     };
     let mut out = Vec::new();
+    // 模块级 const 先输出(WGSL 要求先声明后使用)
+    for item in items {
+        if let Item::Const(c) = item {
+            out.push(ctx.trans_const(c)?);
+        }
+    }
     for item in items {
         let block = match item {
             Item::Use(_) => None, // Rust-only 的东西,不进 WGSL
+            Item::Const(_) => None, // const 已提前输出
             Item::Static(s) => Some(trans_static(s)?),
             Item::Struct(s) => Some(trans_struct(s)?),
             Item::Fn(f) => Some(ctx.trans_fn(f)?),
