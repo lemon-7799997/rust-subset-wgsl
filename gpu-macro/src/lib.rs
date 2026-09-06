@@ -796,6 +796,35 @@ pub fn shader(_args: TokenStream, item: TokenStream) -> TokenStream {
         Err(e) => return e.to_compile_error().into(),
     };
 
+    // 1.5) 自校验(feature "self-validate",默认开):
+    //      宏展开时直接用 naga 解析 + 完整校验产物,不合法 → 编译错误。
+    //      这样每个 #[shader] 编译即自校验,不依赖 demo 单测兜底。
+    #[cfg(feature = "self-validate")]
+    {
+        use naga::valid::{Capabilities, ValidationFlags, Validator};
+        let parsed = match naga::front::wgsl::parse_str(&wgsl_text) {
+            Ok(m) => m,
+            Err(e) => {
+                return syn::Error::new_spanned(
+                    &module,
+                    format!("#[shader] 生成的 WGSL 语法不合法:\n{e}"),
+                )
+                .to_compile_error()
+                .into();
+            }
+        };
+        if let Err(e) = Validator::new(ValidationFlags::all(), Capabilities::all())
+            .validate(&parsed)
+        {
+            return syn::Error::new_spanned(
+                &module,
+                format!("#[shader] 生成的 WGSL 未通过 naga 完整校验:\n{e}"),
+            )
+            .to_compile_error()
+            .into();
+        }
+    }
+
     // 2) 剥干净后重放,让 rustc 对桩库做类型检查
     let Some((_, items)) = module.content else {
         return syn::Error::new_spanned(&module, "`#[shader]` 需要一个带花括号的 mod")

@@ -85,6 +85,7 @@ dependencies = [
 name = "gpu-macro"
 version = "0.1.0"
 dependencies = [
+ "naga",
  "proc-macro2",
  "quote",
  "syn 2.0.119",

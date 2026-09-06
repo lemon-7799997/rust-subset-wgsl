@@ -6,7 +6,14 @@ edition = "2021"
 [lib]
 proc-macro = true
 
+[features]
+# 宏展开时用 naga 校验生成的 WGSL,失败直接编译报错(默认开)。
+# 关掉:在依赖处写 gpu-macro = { path = "..", default-features = false }
+default = ["self-validate"]
+self-validate = ["dep:naga"]
+
 [dependencies]
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full", "parsing", "printing"] }
+naga = { version = "30.0.1", features = ["wgsl-in"], optional = true }

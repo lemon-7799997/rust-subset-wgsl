@@ -14,10 +14,11 @@
 ## 这个翻译器做了什么
 
 - **`gpu` 桩库(按需实现)**:定义 `vec2/3/4<T>`、`mat4x4<T>`、`array<T>`、`texture_2d<T>`、`sampler`、常用数学函数等与 WGSL 同名的类型与函数。规则:**只实现"必须的功能"**——类型要有真实字段、容器要能存元素能下标、运算符要有语义(否则重放副本过不了 rustc);而 WGSL **数学/纹理内建函数保持 no-op**(`unimplemented!()`),因为 CPU 上永远不会执行 shader。
-- **`gpu-macro`(`#[shader]`)**:吃掉一个 `mod`,做三件事:
+- **`gpu-macro`(`#[shader]`)**:吃掉一个 `mod`,做四件事:
   1. 把 AST 打印成 WGSL 文本(`pub const WGSL: &str`);
-  2. 剥掉"翻译用装饰属性"后**重放原代码**,让 rustc 用桩库做类型检查;
-  3. 子集外的语法 → 带源码位置的编译错误。
+  2. **自校验**:宏展开时直接用 naga 解析 + 完整校验产物,不合法 → 编译错误(feature `self-validate`,默认开,见下);
+  3. 剥掉"翻译用装饰属性"后**重放原代码**,让 rustc 用桩库做类型检查;
+  4. 子集外的语法 → 带源码位置的编译错误。
 - **`src/main.rs`**:演示 shader + naga 校验单测。
 
 ## 大致执行流程
@@ -34,14 +35,15 @@
    ① syn 解析成 AST(ItemMod)
    ② 收集模块内 struct 成员顺序(field_order,供字面量还原)
    ③ Ctx::print_* 逐 item 翻译成 WGSL 文本(属性映射/关键字改写/语句/表达式)
-   ④ 剥掉装饰属性(#[group]/#[binding]/...)→ 原代码重放
-   ⑤ 输出: pub const WGSL: &str = "..." + 剥干净的原代码
+   ④ 自校验: naga parse + Validator 校验产物,失败 → 编译错误
+   ⑤ 剥掉装饰属性(#[group]/#[binding]/...)→ 原代码重放
+   ⑥ 输出: pub const WGSL: &str = "..." + 剥干净的原代码
    │
    ▼
 [rustc] 对重放副本做类型检查(桩库在此生效:类型写错当场报错)
    │
    ▼
-[测试] naga::front::wgsl::parse_str + naga::valid::Validator 完整校验 WGSL
+[测试] 演示单测再跑一遍 naga(兼带入口 stage 断言)
    │
    ▼
 [运行时] 取 triangle::WGSL 字符串喂给 wgpu 建 ShaderModule
@@ -192,7 +194,7 @@ static smp: sampler = sampler;                     // @group(0) @binding(2) var 
 ├── gpu/                  # 桩库(只实现"必须的功能",数学内建 no-op)
 │   └── src/lib.rs        #   vec2/3/4<T>、mat4x4<T>、array<T>、texture/sampler、数学函数
 ├── gpu-macro/            # proc-macro crate
-│   └── src/lib.rs        #   #[shader] 翻译器(Ctx::print_*) + 透传属性宏
+│   └── src/lib.rs        #   #[shader] 翻译器(Ctx::print_*)+ 透传宏 + ConstDefault derive + naga 自校验
 ```
 
 ## 使用
@@ -207,11 +209,21 @@ cargo test
 
 写自己的 shader:在任意 crate 里 `use gpu_macro::shader;`、`use gpu::*;`,用 `#[shader] mod` 包住 shader 代码,读 `your_mod::WGSL`。
 
+### 关闭宏内自校验
+
+`gpu-macro` 默认在宏展开期做 naga 自校验(`self-validate` feature,默认开):任何 `#[shader]` 编译时即被 naga 检查,生成的 WGSL 不合法会直接编译报错。想关闭(如为编译速度、或已用外部校验)时,依赖写成:
+
+```toml
+gpu-macro = { path = "..", default-features = false }
+```
+
+
 ## 设计原则与现状
 
 - **桩库按需实现**:类型/容器/运算符等"必须的功能"要真实(否则重放副本过不了 rustc);WGSL 数学/纹理内建函数保持 no-op。
 - **只做 WGSL 标准语法**;标准没有的语法在翻译时报错并指向源码位置。
-- **两条护栏**:rustc 类型检查(重放副本)+ naga 完整校验(测试)。
+- **三层护栏**:rustc 类型检查(重放副本)+ 宏展开期 naga 自校验(默认开)+ 演示单测的 naga 校验。
+- **暂未实现(备选方向,以后再说)**:模块声明顺序的自动检查/调整(struct/static 目前按源顺序输出、const 自动提前)、binding 号/变量名冲突检测、重复绑定检查。设计初衷是"rust 风味的 WGSL 编写体验":用户代码以 WGSL 正确性为优先,翻译器保证生成的 WGSL 合法(rustc 类型检查 + 宏内 naga 自校验);这类"替你纠错"的兜底检查不是优先项,需要时再加。
 - 现状:uniform / storage(读写)/ texture / sampler 模块级声明、模块级 const、`mat4x4<T>`、`array<T>`(storage 用)、struct、属性映射、if/else、loop/while/for、break/continue/return、unsafe 透明(块/fn)、多入口(vs+fs+compute)、构造器/cast/纹理函数透传、矩阵×向量都有;UBO 布局属性(@size/@align)、更多矩阵(2x2/3x3)与纹理类型、定长/字面量数组还没做。
 
 ## 已知取舍
