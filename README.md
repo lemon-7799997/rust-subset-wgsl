@@ -84,6 +84,7 @@
 | `#[builtin(vertex_index)]` | 参数 | `@builtin(vertex_index) vid: u32` |
 | `#[location(0)]` | 参数 / struct 成员 / fn(返回值) | `@location(0)` |
 | `#[interpolate(flat)]` | 参数 / struct 成员 | `@interpolate(flat)` |
+| `#[align(16)]` / `#[size(16)]` | struct 成员(布局) | 成员 `@align(16)` / `@size(16)` |
 
 > Rust 语法不允许给 `-> 返回类型` 挂属性,所以"返回值的装饰"约定写在 **fn 头**上,翻译时挪到返回类型前。
 > `#[allow(...)]` 等普通属性不是装饰属性,宏会保留(仍属 Rust-only,不进 WGSL)。
@@ -224,7 +225,7 @@ gpu-macro = { path = "..", default-features = false }
 - **只做 WGSL 标准语法**;标准没有的语法在翻译时报错并指向源码位置。
 - **三层护栏**:rustc 类型检查(重放副本)+ 宏展开期 naga 自校验(默认开)+ 演示单测的 naga 校验。
 - **暂未实现(备选方向,以后再说)**:模块声明顺序的自动检查/调整(struct/static 目前按源顺序输出、const 自动提前)、binding 号/变量名冲突检测、重复绑定检查。设计初衷是"rust 风味的 WGSL 编写体验":用户代码以 WGSL 正确性为优先,翻译器保证生成的 WGSL 合法(rustc 类型检查 + 宏内 naga 自校验);这类"替你纠错"的兜底检查不是优先项,需要时再加。
-- 现状:uniform / storage(读写)/ texture / sampler 模块级声明、模块级 const、`mat4x4<T>`、`array<T>`(storage 用)、struct、属性映射、if/else、loop/while/for、break/continue/return、unsafe 透明(块/fn)、多入口(vs+fs+compute)、构造器/cast/纹理函数透传、矩阵×向量都有;UBO 布局属性(@size/@align)、更多矩阵(2x2/3x3)与纹理类型、定长/字面量数组还没做。
+- 现状:uniform / storage(读写)/ texture / sampler 模块级声明、模块级 const、`mat4x4<T>`、`array<T>`(storage 用)、struct、属性映射、if/else、loop/while/for、break/continue/return、unsafe 透明(块/fn)、多入口(vs+fs+compute)、构造器/cast/纹理函数透传、矩阵×向量都有;UBO 布局属性(@size/@align)已支持;更多矩阵(2x2/3x3)与纹理类型、定长/字面量数组还没做。
 
 ## 已知取舍
 

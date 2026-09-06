@@ -88,8 +88,12 @@ mod triangle {
     }
 
     // 相机 UBO:uniform 里放 struct,struct 里放矩阵(默认布局即满足对齐)
+    // 布局属性 #[align(N)]/#[size(N)] → 成员 @align(N)/@size(N)
     struct Camera {
         view_proj: mat4x4<f32>,
+        #[align(16)]
+        #[size(16)] // vec3 默认 12B,@size(16) 补足到 16(对齐 16 的倍数)
+        tint: vec3<f32>,
     }
 
     #[allow(non_upper_case_globals)]
@@ -102,6 +106,7 @@ mod triangle {
             0.0, 0.0, 1.0, 0.0, //
             0.0, 0.0, 0.0, 1.0, //
         ),
+        tint: vec3::<f32>(0.0, 0.0, 0.0),
     };
 
     #[vertex]

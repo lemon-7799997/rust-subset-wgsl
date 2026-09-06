@@ -12,9 +12,12 @@
 //! 结构体字面量的 `..base` 更新、带 label 的循环等。
 //!
 //! 已支持的翻译规则:
-//!   - 模块级 `static` + `#[group(..)] #[binding(..)]` → `@group(..) @binding(..) var<uniform>`
+//!   - 模块级 `static` + `#[group(..)] #[binding(..)]` → `@group(..) @binding(..) var<uniform>`;
+//!     `#[storage(..)]` → `<storage>` 地址空间
+//!   - 模块级 `const`(自动提前到模块最前)
 //!   - 模块内 `struct Name { ... }`:
 //!       * 成员上的 `#[builtin(..)]/#[location(..)]/#[interpolate(..)]` → `@...`(成员装饰)
+//!       * 布局属性 `#[align(N)]/#[size(N)]` → 成员 `@align(N)` / `@size(N)`
 //!       * Rust 命名字面量 `Name { a: x, b: y }` → WGSL 位置构造器 `Name(x, y)`
 //!         (按 struct 声明顺序,成员名和个数由 rustc 保证一致)
 //!       * 用户 struct 不允许泛型(WGSL 没有)
@@ -25,10 +28,10 @@
 //!   - `e as f32` → `f32(e)`;`vec2::<f32>(..)` → `vec2<f32>(..)`(turbofish 的 `::` 被吃掉)
 //!   - 语句: if/else if/else、loop、while、`for k in 0..N`(重写成 WGSL for 头)、
 //!     break/continue、return
+//!   - 宏展开期 naga 自校验(feature `self-validate`,默认开)
 //!   - 超出子集的语法 → 带源码 span 的编译错误
 //!
-//! 未实现(下一刀): 模块级常量/array/纹理/采样器、storage buffer、swizzle、
-//! `0..N` 之外的迭代、struct 布局属性(@size/@align)等。
+//! 未实现(下一刀): swizzle、`0..N` 之外的迭代、数组字面量/定长数组、更多矩阵/纹理类型等。
 
 use proc_macro::TokenStream;
 use quote::{quote, ToTokens};
@@ -57,6 +60,8 @@ fn is_decoration(attr: &Attribute) -> bool {
                 | "workgroup_size"
                 | "interpolate"
                 | "storage"
+                | "align"
+                | "size"
         )
     })
 }
@@ -581,15 +586,27 @@ fn trans_static(s: &ItemStatic) -> Result<String, syn::Error> {
     for attr in &s.attrs {
         if let Some((name, text)) = attr_decor(attr) {
             match name.as_str() {
-                "group" => has_group = true,
-                "binding" => has_binding = true,
+                "group" | "binding" => {
+                    // @group/@binding 进装饰列表,和 var 拼在一起
+                    if name == "group" {
+                        has_group = true;
+                    } else {
+                        has_binding = true;
+                    }
+                    decors.push(text);
+                }
                 "storage" => {
                     storage_attr = Some(storage_mode(attr)?);
                     continue; // 不是 @ 装饰,是地址空间
                 }
-                _ => {}
+                // 其余装饰(@builtin/@location/@align/@size/...)不能出现在 static 上
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        attr,
+                        format!("#[{name}] 不能用在模块级 static 上(只属于 fn/参数/struct 成员)"),
+                    ))
+                }
             }
-            decors.push(text);
         }
     }
     if !(has_group && has_binding) {
@@ -873,7 +890,9 @@ passthrough!(
     builtin,
     location,
     interpolate,
-    storage
+    storage,
+    align,
+    size
 );
 
 

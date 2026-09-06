@@ -35,13 +35,13 @@ cargo check -p gpu-macro   # 只查宏 crate
 ## 翻译器内部地图(gpu-macro/src/lib.rs)
 
 - **装饰属性** → WGSL `@xxx`:
-  - `is_decoration(attr)`:判定哪些属性是"翻译用"的(当前:group/binding/vertex/fragment/compute/builtin/location/workgroup_size/interpolate/**storage**);
+  - `is_decoration(attr)`:判定哪些属性是"翻译用"的(当前:group/binding/vertex/fragment/compute/builtin/location/workgroup_size/interpolate/**storage**/**align**/**size**);
   - `attr_decor(attr)` → `(名字, "@...")` 文本;非装饰属性返回 None。注意 `storage` 例外:它不走 `@` 文本,而是被 `trans_static` 单独解析成地址空间(见下)。
 - **Ctx(带上下文打印器)**:
   - `Ctx.field_order`:模块内 struct 名 → 成员声明顺序(Rust 命名字面量 → WGSL 位置构造器靠它);
   - `print_expr` / `print_stmt` / `print_block` / `print_if_stmt` / `render_loop_body` / `print_for`:表达式与语句递归打印;
   - `trans_fn`:入口/普通函数(参数装饰、返回值装饰、函数体)。
-- **模块级**:`trans_static`(static → var<uniform>;**texture_2d/sampler 等 handle 类型不加地址空间**;**`#[storage]` / `#[storage(read_write)]` → `<storage>` / `<storage, read_write>`**,可写 buffer 用 `static mut` + `unsafe`)、`trans_struct`、`trans_const`(模块级 const → WGSL const)、`trans_module`(先收集 field_order;再把 **const 整体提前输出**——WGSL 要求先声明后使用)。
+- **模块级**:`trans_static`(static 上只允许 group/binding/storage,**其他装饰如 `#[align]` 会被拒绝**;值类型 → var<uniform>;**texture_2d/sampler 等 handle 类型不加地址空间**;**`#[storage]` / `#[storage(read_write)]` → `<storage>` / `<storage, read_write>`**,可写 buffer 用 `static mut` + `unsafe`)、`trans_struct`、`trans_const`(模块级 const → WGSL const)、`trans_module`(先收集 field_order;再把 **const 整体提前输出**——WGSL 要求先声明后使用)。
 - **`unsafe`**:`unsafe fn` 与 `unsafe {}` 块都是 Rust-only(写 `static mut` 的必要手段),翻译时**透明剥掉**;块当表达式用会报错。对应宏在重放 mod 上加的 allow 含 `static_mut_refs`。
 - **宏入口 `shader`**:翻译(出错则直接返回编译错误)→ 剥装饰 → 重放 + `pub const WGSL`。文件底部还有一组**透传属性宏**(展开 = 原样返回),让装饰属性在 `#[shader]` 外也不报错。
 - **turbofish 规则**:`vec2::<f32>(..)` → `vec2<f32>(..)`(吃掉 `::`);syn 里泛型参数在 path 的 `AngleBracketed` 里,显式可读,翻译器不需要类型推断。
