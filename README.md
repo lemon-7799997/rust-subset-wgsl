@@ -13,7 +13,8 @@
 
 ## 这个翻译器做了什么
 
-- **`gpu` 桩库(按需实现)**:**向量/矩阵直接 re-export glam**(`Vec2/3/4`、`Mat2/3/4`、`IVec*/UVec*`),翻译器把 glam 类型名/构造调用译回 WGSL;其余 WGSL-only 的东西仍以"名字 = WGSL 名"的桩形式提供:`array<T>` 假容器、`texture_2d<T>`/`sampler` 等 handle、数学/纹理自由函数(no-op,CPU 上永不执行 shader)。
+- **`gpu` 桩库(按需实现)**:**向量/矩阵直接 re-export glam**(`Vec2/3/4`、`Mat2/3/4`、`IVec*/UVec*`),翻译器把 glam 类型名/构造调用译回 WGSL;其余 WGSL-only 的东西仍以"名字 = WGSL 名"的桩形式提供:`array<T>` 假容器、`texture_2d<T>`/`sampler` 等 handle、数学/纹理自由函数(no-op,CPU 上永不执行 shader)。桩库代码按主题拆在子模块里(`vec2.rs`/`vec3.rs`/`vec4.rs`、`mat2x2.rs`/`mat3x3.rs`/`mat4x4.rs`、`math.rs`、`texture.rs`、`arrays.rs`、`const_default.rs`)。
+- **WGSL 风格构造宏**(CPU 侧与 `#[shader]` 函数体内通用,翻译器识别后输出 WGSL 构造器文本):`vec2f!` / `vec3f!` / `vec4f!`(1 参 = splat,N 个标量全填)、`mat2x2f!` / `mat3x3f!` / `mat4x4f!`(1 参 = 对角矩阵,列向量,或 dim² 个标量列主序)。
 - **`gpu-macro`(`#[shader]`)**:吃掉一个 `mod`,做四件事:
   1. 把 AST 打印成 WGSL 文本(`pub const WGSL: &str`);
   2. **自校验**:宏展开时直接用 naga 解析 + 完整校验产物,不合法 → 编译错误(feature `self-validate`,默认开,见下);
@@ -157,6 +158,11 @@ fn vs_main(#[builtin(vertex_index)] vid: u32) -> VsOut {
 | `Vec4::splat(v)` | `vec4<f32>(v, v, v, v)` | 单参 splat 展开成 dim 个实参,最稳 |
 | `IVec2::new(x, y)` / `UVec3::new(x, y, z)` | `vec2<i32>(...)` / `vec3<u32>(...)` | i32/u32 向量构造 |
 | `Mat2::from_cols(a, b)` / `Mat3::from_cols(a, b, c)` / `Mat4::from_cols(a, b, c, d)` | `mat2x2<f32>(a, b)` 等 | 按 2/3/4 个列向量构造(WGSL 支持按列传列向量) |
+| `vec2f!(x, y)` / `vec3f!(x, y, z)` / `vec4f!(x, y, z, w)` | `vec2<f32>(...)` 等 | **构造宏**,N 标量全填 |
+| `vec2f!(s)` / `vec3f!(s)` / `vec4f!(s)` | `vecN<f32>(s, …, s)` | 构造宏单参 = splat |
+| `mat2x2f!(c0, c1)` / `mat3x3f!(c0..c2)` / `mat4x4f!(c0..c3)` | `matNxN<f32>(列向量…)` | 构造宏按列传列向量 |
+| `mat2x2f!(4 标量)` / `mat3x3f!(9 标量)` / `mat4x4f!(16 标量)` | `matNxN<f32>(标量,列主序)` | 构造宏全量标量 |
+| `mat2x2f!(s)` / `mat3x3f!(s)` / `mat4x4f!(s)` | `matNxN<f32>(对角显式展开)` | 构造宏单参 = 对角矩阵 |
 | `u_cam.view_proj * pos4` | 同 | `Mat4 × Vec4`(glam 运算符) |
 | `f32(vid)`(Rust 写 `vid as f32`) | `f32(vid)` | `as` 转换 → WGSL 转换构造器 |
 | `p.x` | `p.x` | 字段访问(glam 字段名 = WGSL 分量名) |
@@ -197,8 +203,8 @@ static smp: sampler = sampler;              // @group(0) @binding(2) var smp: sa
 - 用户 struct 泛型、tuple struct、空 struct、`..base` 更新语法、结构体字面量引用模块外的 struct
 - `for` 遍历非区间(如 vector)、`0..` 开区间
 - `let` 无初值、`break 值`、带 label 的循环、裸块语句、`return` 出现在表达式位
-- 多段路径(`a::b::c`)、方法调用、闭包、宏语句、`swizzle`(`.xy` 之类 Rust 语法根本没有)
-- **glam 常量(`Vec4::ZERO` 等)与 glam 方法调用**(`.normalize()`/`.dot()` 等)出现在**会翻译的表达式**里(static 初值例外,整体丢弃不翻译)——目前的构造白名单只有 `new` / `splat` / `MatN::from_cols`
+- 多段路径(`a::b::c`)、方法调用、闭包、`swizzle`(`.xy` 之类 Rust 语法根本没有)、宏语句(除 `vec2f!/vec3f!/vec4f!/mat2x2f!/mat3x3f!/mat4x4f!` 这组构造宏外)
+- **glam 常量(`Vec4::ZERO` 等)与 glam 方法调用**(`.normalize()`/`.dot()` 等)出现在**会翻译的表达式**里(static 初值例外,整体丢弃不翻译)——目前的构造白名单只有 `new` / `splat` / `MatN::from_cols` 与 `vecNf!`/`matNxNf!` 构造宏;宏名不在白名单里也报错
 - `array<T>` 的**字面量构造**(WGSL `array<f32,3>(1.0,2.0,3.0)` 没有对应的 Rust 语法)、**定长数组**(含 uniform 里的数组)暂不支持——目前 runtime 形态 `array<T>` 只出现在 storage buffer 成员里
 
 ## 项目结构
@@ -207,10 +213,10 @@ static smp: sampler = sampler;              // @group(0) @binding(2) var smp: sa
 .
 ├── Cargo.toml            # workspace: 根 bin + gpu + gpu-macro
 ├── src/main.rs           # 演示 shader(#[shader] mod triangle)+ naga 校验单测
-├── gpu/                  # 桩库:glam 再导出 + handle/array/数学桩(数学内建 no-op)
-│   └── src/lib.rs        #   pub use glam::{Vec2..Mat4..}; texture/sampler; array<T>; ConstDefault; 数学函数
+├── gpu/                  # 桩库:glam 再导出 + 构造宏 + handle/array/数学桩(数学内建 no-op)
+│   └── src/              # lib.rs(薄入口+再导出)、vec2/3/4.rs 与 mat2x2/3x3/4x4.rs(构造宏)、math.rs、texture.rs、arrays.rs、const_default.rs
 ├── gpu-macro/            # proc-macro crate
-│   └── src/lib.rs        #   #[shader] 翻译器(glam 映射 + Ctx::print_*)+ 透传宏 + ConstDefault derive + naga 自校验
+│   └── src/lib.rs        #   #[shader] 翻译器(glam/构造宏映射 + Ctx::print_*)+ 透传宏 + ConstDefault derive + naga 自校验
 ```
 
 ## 使用
@@ -239,7 +245,7 @@ gpu-macro = { path = "..", default-features = false }
 - **只做 WGSL 标准语法**;标准没有的语法在翻译时报错并指向源码位置。
 - **三层护栏**:rustc 类型检查(重放副本,glam 部分是真语义)+ 宏展开期 naga 自校验(默认开)+ 演示单测的 naga 校验。
 - **暂未实现(备选方向,以后再说)**:模块声明顺序的自动检查/调整(struct/static 目前按源顺序输出、const 自动提前)、binding 号/变量名冲突检测、重复绑定检查。设计初衷是"rust 风味的 WGSL 编写体验":用户代码以 WGSL 正确性为优先,翻译器保证生成的 WGSL 合法(rustc 类型检查 + 宏内 naga 自校验);这类"替你纠错"的兜底检查不是优先项,需要时再加。
-- 现状:glam 向量/矩阵(Vec2/3/4、Mat2/3/4、IVec*/UVec*,声明/构造映射)、uniform / storage(读写)/ texture / sampler 模块级声明、模块级 const、struct、属性映射、if/else、loop/while/for、break/continue/return、unsafe 透明(块/fn)、多入口(vs+fs+compute)、构造器/cast/纹理函数透传、矩阵×向量、UBO 布局属性(@size/@align)、纹理家族(cube/2d_array/depth + compare 采样器)都有;定长/字面量数组、swizzle、glam 方法风(shader 内方法调用)还没做。
+- 现状:glam 向量/矩阵(Vec2/3/4、Mat2/3/4、IVec*/UVec*,声明/构造映射)、WGSL 风格构造宏(vec2f!/vec3f!/vec4f!/mat2x2f!/mat3x3f!/mat4x4f!:splat/对角/N 标量/列向量)、uniform / storage(读写)/ texture / sampler 模块级声明、模块级 const、struct、属性映射、if/else、loop/while/for、break/continue/return、unsafe 透明(块/fn)、多入口(vs+fs+compute)、构造器/cast/纹理函数透传、矩阵×向量、UBO 布局属性(@size/@align)、纹理家族(cube/2d_array/depth + compare 采样器)都有;定长/字面量数组、swizzle、glam 方法风(shader 内方法调用)还没做。
 
 ## 已知取舍
 

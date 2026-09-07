@@ -11,7 +11,7 @@
 | 路径 | 内容 | 改它之前要知道 |
 |---|---|---|
 | `src/main.rs` | 演示 shader + naga 校验单测 | 演示 mod 就是翻译器的"回归测试集",扩展语法时应同步扩展它 |
-| `gpu/` | 桩库(**glam 再导出**:Vec2/3/4、Mat2/3/4、IVec*/UVec*;array<T>、纹理/采样器 handle 家族、`ConstDefault` trait + 原生/glam impl、数学自由函数) | **规则:只实现"必须的功能"**——向量/矩阵直接来自 glam(真类型、真运算,重放副本用真语义检查);array/handle/数学桩保持 no-op(`unimplemented!()`);`gpu` 依赖 glam,给 glam 类型补 `ConstDefault` impl 合法(trait 本地) |
+| `gpu/` | 桩库(**glam 再导出**:Vec2/3/4、Mat2/3/4、IVec*/UVec*;array<T>、纹理/采样器 handle 家族、`ConstDefault` trait + 原生/glam impl、数学自由函数;**构造宏** vec2f!/vec3f!/vec4f!/mat2x2f!/mat3x3f!/mat4x4f!)。代码按主题拆子模块:`vec2/3/4.rs`、`mat2x2/3x3/4x4.rs`、`math.rs`、`texture.rs`、`arrays.rs`、`const_default.rs`,`lib.rs` 只做再导出 | **规则:只实现"必须的功能"**——向量/矩阵直接来自 glam(真类型、真运算,重放副本用真语义检查);array/handle/数学桩保持 no-op(`unimplemented!()`);`gpu` 依赖 glam,给 glam 类型补 `ConstDefault` impl 合法(trait 本地)。构造宏是 `#[macro_export]`,挂在 crate 根,`use gpu::*;` 就能带进 shader |
 | `gpu-macro/` | proc-macro:`#[shader]` 翻译器、透传属性宏、`ConstDefault` derive | 翻译逻辑都在这;`ConstDefault` 的 **trait 在 gpu**、**derive 在 gpu-macro**,使用处两者都要引入(derive 生成的是不带路径的 `impl ConstDefault`,trait 必须在作用域里) |
 
 ## 命令
@@ -45,7 +45,7 @@ cargo check -p gpu-macro   # 只查宏 crate
 - **`unsafe`**:`unsafe fn` 与 `unsafe {}` 块都是 Rust-only(写 `static mut` 的必要手段),翻译时**透明剥掉**;块当表达式用会报错。对应宏在重放 mod 上加的 allow 含 `static_mut_refs`。
 - **宏入口 `shader`**:翻译(出错则直接返回编译错误)→ 剥装饰 → 重放 + `pub const WGSL`。文件底部还有一组**透传属性宏**(展开 = 原样返回),让装饰属性在 `#[shader]` 外也不报错。
 - **改名表 `map_wgsl_name`**:Rust 没有函数重载 → WGSL 同名不同签名的内建在桩库拆成不同 Rust 名(texture_sample_cube/array/depth → `textureSample`、texture_sample_compare → `textureSampleCompare`、texture_load_cube → `textureLoad`、texture_dimensions_array → `textureDimensions`)。给这类函数加桩时记得同时扩表。
-- **glam 映射(全 glam 迁移)**:`glam_type_shape(name)` 是唯一定义"glam 名 → (WGSL 基底, 元素类型, 维数)"的地方(Vec2/3/4、IVec*/UVec*、Mat2/3/4);`print_type` 靠它把声明位置的类型译回 WGSL(`Vec4` → `vec4<f32>`、`UVec3` → `vec3<u32>`);`print_expr` 的 Call 分支靠它处理构造调用(`Vec4::new(..)` → `vec4<f32>(..)`、`Vec4::splat(v)` → 展开 dim 次、`MatN::from_cols(列向量…)` → `matNxN<f32>(列向量…)`)。**glam 常量(`Vec4::ZERO` 等)与方法调用译不了 → 报错**;static 初值会被整体丢弃(trans_static 不打印初值),所以那里可以放心用常量。加 glam 类型/构造映射时只改这一处表。
+- **glam/构造宏映射(全 glam 迁移)**:`glam_type_shape(name)` 是唯一定义"构造目标 → (WGSL 基底, 元素类型, 维数)"的地方——同时收 **glam 类型名**(Vec2/3/4、IVec*/UVec*、Mat2/3/4)与 **构造宏名**(vec2f!/vec3f!/vec4f!/mat2x2f!/mat3x3f!/mat4x4f!);`print_type` 靠它把声明位置的类型译回 WGSL(`Vec4` → `vec4<f32>`、`UVec3` → `vec3<u32>`);`print_expr` 的 Call 分支靠它处理 `Vec4::new/splat`、`MatN::from_cols` 调用;`print_expr` 的 `Expr::Macro` 分支靠它把构造宏译成 WGSL 构造器(1 参=splat/对角显式展开、N 标量全填、矩阵列传/`dim²` 标量),参数用 `Punctuated::parse_terminated` 解析。**glam 常量(`Vec4::ZERO` 等)、方法调用与白名单外的宏译不了 → 报错**;static 初值会被整体丢弃(trans_static 不打印初值),所以那里可以放心用常量/宏。加类型/构造宏时只改这一处表 + gpu 对应宏文件。
 - **重载模拟(自由函数接收元组)**:`Expr::Call` 里 `textureLoad((…))`(单个元组参数)会被摊平成 WGSL `textureLoad(…)`(见 gpu 的 `TextureLoad` trait 与三个 impl,带关联类型 `Output = Vec4`);缺参/错形会先在宏内被 naga 或 rustc 拦下。其他方法调用一律报错。注意元组里裸字面量在泛型位置可能推断不出类型,调用处用有类型的参数/变量。
 - **turbofish 规则(历史遗留)**:`vec2::<f32>(..)` → `vec2<f32>(..)` 是桩 vec 时代的语法,全 glam 迁移后向量构造走 `Vec4::new(..)`,此分支仅剩"其他显式泛型调用"时触发;syn 里泛型参数在 path 的 `AngleBracketed` 里,显式可读,翻译器不需要类型推断。
 
@@ -69,3 +69,4 @@ cargo check -p gpu-macro   # 只查宏 crate
 - `array<T>` 是"假容器"(内部一个 `phantom` 元素,Index/IndexMut 忽略下标,只为 typecheck 过),用于 storage buffer 成员;**数组字面量/定长数组 `array<T,N>` 还没做**,遇到先报错而不是硬编。
 - WGSL 要求模块内"先声明后使用":const 已被自动提前,但 struct/static 仍按**源顺序**输出——演示 mod 里把声明放在使用它们的函数前面,别依赖 Rust 的顺序无关性。
 - `ConstDefault` derive 只支持 struct:命名字段 `Self { .. }`、元组字段 `Self(..)`、单元 `Self`,三者构造写法不同(曾因一律 `Self(...)` 让命名字段 struct 报 `expected identifier, found ':'`);enum/union 给编译错误,别在宏里 `panic!`。derive 生成的 impl 引用不带路径的 `ConstDefault`,使用处必须把 trait 引进来。
+- **macro_rules 固定元数 arm 记得给尾逗号留口**:调用点多行书写爱带尾逗号,模式写成 `($x:expr, $y:expr $(,)?) => …`(expr 片段可以匹配嵌套宏调用,如 `mat3x3f!(vec3f!(…), …)` 没问题);忘了 `$(,)?` 会静默落到 fallback 的 `compile_error!`,报错信息让人误以为是参数种类不对。

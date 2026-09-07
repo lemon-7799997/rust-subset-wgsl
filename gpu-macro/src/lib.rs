@@ -41,8 +41,8 @@ use proc_macro::TokenStream;
 use quote::{quote, ToTokens};
 use std::collections::HashMap;
 use syn::{
-    parse_macro_input, Attribute, Expr, FnArg, GenericArgument, Item, ItemFn, ItemMod, ItemStatic,
-    ItemStruct, Meta, Pat, ReturnType, Stmt, Type,
+    parse::Parser, parse_macro_input, Attribute, Expr, FnArg, GenericArgument, Item, ItemFn,
+    ItemMod, ItemStatic, ItemStruct, Meta, Pat, ReturnType, Stmt, Type,
 };
 
 // ============================================================================
@@ -119,23 +119,24 @@ fn map_wgsl_name(rust_name: &str) -> &str {
     }
 }
 
-/// glam 向量/矩阵类型 → (WGSL 基底名, 元素类型, 分量数/列数)。
-/// 全 glam 迁移后:声明/构造位置的 glam 名要译回 WGSL 文本,例如
-///   Vec4 → vec4<f32>、Mat4 → mat4x4<f32>、UVec3 → vec3<u32>。
+/// WGSL 向量/矩阵的构造目标 → (WGSL 基底名, 元素类型, 分量数/列数)。
+/// 同时覆盖 glam 类型名(Vec4/Mat4/UVec3…,用于声明与 `Type::new` 这类调用)
+/// 与 WGSL 风格构造宏名(vec4f!/mat4x4f!…,用于 `Expr::Macro`)。
+/// 例如 Vec4 / vec4f → ("vec4", "f32", 4)。
 fn glam_type_shape(name: &str) -> Option<(&'static str, &'static str, usize)> {
     Some(match name {
-        "Vec2" => ("vec2", "f32", 2),
-        "Vec3" => ("vec3", "f32", 3),
-        "Vec4" => ("vec4", "f32", 4),
+        "Vec2" | "vec2f" => ("vec2", "f32", 2),
+        "Vec3" | "vec3f" => ("vec3", "f32", 3),
+        "Vec4" | "vec4f" => ("vec4", "f32", 4),
         "IVec2" => ("vec2", "i32", 2),
         "IVec3" => ("vec3", "i32", 3),
         "IVec4" => ("vec4", "i32", 4),
         "UVec2" => ("vec2", "u32", 2),
         "UVec3" => ("vec3", "u32", 3),
         "UVec4" => ("vec4", "u32", 4),
-        "Mat2" => ("mat2x2", "f32", 2),
-        "Mat3" => ("mat3x3", "f32", 3),
-        "Mat4" => ("mat4x4", "f32", 4),
+        "Mat2" | "mat2x2f" => ("mat2x2", "f32", 2),
+        "Mat3" | "mat3x3f" => ("mat3x3", "f32", 3),
+        "Mat4" | "mat4x4f" => ("mat4x4", "f32", 4),
         _ => return None,
     })
 }
@@ -336,6 +337,8 @@ impl Ctx<'_> {
                 ))
             }
             Expr::Paren(p) => Ok(format!("({})", self.print_expr(&p.expr)?)),
+            // WGSL 风格构造宏: vec4f!(...) / mat4x4f!(...) 等 → WGSL 构造器文本
+            Expr::Macro(m) => self.print_ctor_macro(&m.mac),
             Expr::MethodCall(m) => Err(syn::Error::new_spanned(
                 m,
                 "不支持方法调用;重载模拟请用「自由函数接收元组」: textureLoad((纹理, 坐标[, 层], mip层))",
@@ -366,7 +369,7 @@ impl Ctx<'_> {
                 if has_generics {
                     return Err(syn::Error::new_spanned(
                         s,
-                        "gpu 的向量/矩阵等请用 vec2::<f32>(...) 构造器, 不要写结构体字面量",
+                        "向量/矩阵请用构造调用(Vec4::new(..) / mat4x4f!(..) 等), 不要写结构体字面量",
                     ));
                 }
                 let order = self.field_order.get(&name).ok_or_else(|| {
@@ -412,6 +415,78 @@ impl Ctx<'_> {
             }
             other => Err(err(other, "这种表达式")),
         }
+    }
+
+    /// WGSL 风格构造宏:`vec2f!`/`vec3f!`/`vec4f!`/`mat2x2f!`/`mat3x3f!`/`mat4x4f!`
+    /// → WGSL 构造器文本。语义与 gpu 桩库同名宏一致:
+    /// - 向量:1 参 = splat(展开成 dim 个实参),dim 个标量 = 全填;
+    /// - 矩阵:1 参 = 对角矩阵(显式展开成 dim² 个槽),dim 个列向量,或 dim² 个标量(列主序)。
+    fn print_ctor_macro(&self, mac: &syn::Macro) -> Result<String, syn::Error> {
+        let name = path_last(&mac.path);
+        let Some((base, elem, dim)) = glam_type_shape(&name) else {
+            return Err(syn::Error::new_spanned(
+                mac,
+                format!(
+                    "不认识的宏 `{name}!`;目前只支持 WGSL 构造宏: \
+                     vec2f! / vec3f! / vec4f! / mat2x2f! / mat3x3f! / mat4x4f!"
+                ),
+            ));
+        };
+        let args = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+            .parse2(mac.tokens.clone())
+            .map_err(|e| syn::Error::new_spanned(mac, format!("`{name}!` 的参数解析失败: {e}")))?;
+        let printed = args
+            .iter()
+            .map(|a| self.print_expr(a))
+            .collect::<Result<Vec<_>, _>>()?;
+        let n = printed.len();
+        let is_mat = base.starts_with("mat");
+        let wgsl = if !is_mat {
+            match n {
+                // 1 参 = splat,展开成 dim 个实参最稳(避开对 WGSL 单参 splat 语法的依赖)
+                1 => format!("{base}<{elem}>({})", vec![printed[0].clone(); dim].join(", ")),
+                k if k == dim => format!("{base}<{elem}>({})", printed.join(", ")),
+                k => {
+                    return Err(syn::Error::new_spanned(
+                        mac,
+                        format!(
+                            "`{name}!` 需要 1 个标量(splat)或正好 {dim} 个标量,收到 {k} 个"
+                        ),
+                    ))
+                }
+            }
+        } else {
+            match n {
+                // 单标量 → 对角矩阵(WGSL 语义),显式展开成 dim² 个槽,语义无歧义
+                1 => {
+                    let s = &printed[0];
+                    let mut slots = Vec::new();
+                    for col in 0..dim {
+                        for row in 0..dim {
+                            slots.push(if col == row {
+                                s.clone()
+                            } else {
+                                "0.0".to_string()
+                            });
+                        }
+                    }
+                    format!("{base}<{elem}>({})", slots.join(", "))
+                }
+                // dim 个实参 = 按列传列向量;dim² 个实参 = N² 标量、列主序
+                k if k == dim => format!("{base}<{elem}>({})", printed.join(", ")),
+                k if k == dim * dim => format!("{base}<{elem}>({})", printed.join(", ")),
+                k => {
+                    return Err(syn::Error::new_spanned(
+                        mac,
+                        format!(
+                            "`{name}!` 需要 1 个标量(对角)、{dim} 个列向量或 {dim2} 个标量(列主序),收到 {k} 个",
+                            dim2 = dim * dim
+                        ),
+                    ))
+                }
+            }
+        };
+        Ok(wgsl)
     }
 
     fn print_stmt(&self, stmt: &Stmt, pad: &str) -> Result<String, syn::Error> {

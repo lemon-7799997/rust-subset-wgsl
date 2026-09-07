@@ -7,6 +7,7 @@
 //!   - texture/sampler handle、array<T>、数学自由函数仍是桩(名字 = WGSL 名);
 //!   - 三入口:@vertex + @fragment + @compute;naga 完整校验
 //! ============================================================================
+#![allow(non_upper_case_globals)]
 
 use gpu_macro::shader;
 
@@ -48,26 +49,18 @@ mod triangle {
 
     // static + 属性 => WGSL 模块级 var(见上面的期望产物)
     // #[allow] 不是装饰属性,宏会保留它;WGSL 全局变量约定就是小写命名
-    #[allow(non_upper_case_globals)]
-    #[group(0)]
-    #[binding(0)]
-    static someName: f32 = ConstDefault::DEFAULT;
-
     #[group(0)]
     #[binding(0)]
     static u_scale: f32 = ConstDefault::DEFAULT;
 
-    #[allow(non_upper_case_globals)]
     #[group(0)]
     #[binding(1)]
     static tex: texture_2d<f32> = ConstDefault::DEFAULT;
 
-    #[allow(non_upper_case_globals)]
     #[group(0)]
     #[binding(2)]
     static smp: sampler = ConstDefault::DEFAULT;
 
-    #[allow(non_upper_case_globals)]
     #[group(0)]
     #[binding(3)]
     static u_color: Vec4 = ConstDefault::DEFAULT;
@@ -80,7 +73,6 @@ mod triangle {
         pos: array<Vec4>,
     }
 
-    #[allow(non_upper_case_globals)]
     #[group(0)]
     #[binding(4)]
     #[storage(read_write)]
@@ -103,37 +95,37 @@ mod triangle {
         tint: Vec3,
     }
 
-    #[allow(non_upper_case_globals)]
     #[group(0)]
     #[binding(5)]
-    // static 初值只用于 Rust 侧类型检查(翻译时丢弃),所以可以放心用 glam 常量
+    // static 初值只用于 Rust 侧类型检查(翻译时丢弃),所以这里可以直接用
+    // 构造宏(mat4x4f! 16 标量列主序、vec3f! 单参 splat),不会进 WGSL
     static u_camera: Camera = Camera {
-        view_proj: Mat4::IDENTITY,
-        tint: Vec3::ZERO,
+        view_proj: mat4x4f!(
+            1.0, 0.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0, //
+            0.0, 0.0, 0.0, 1.0, //
+        ),
+        tint: vec3f!(0.0),
     };
 
     // 纹理家族:cube / 2d_array / depth + compare 采样器(handle,无地址空间)
-    #[allow(non_upper_case_globals)]
     #[group(0)]
     #[binding(6)]
     static tex_cube: texture_cube<f32> = ConstDefault::DEFAULT;
 
-    #[allow(non_upper_case_globals)]
     #[group(0)]
     #[binding(7)]
     static tex_arr: texture_2d_array<f32> = ConstDefault::DEFAULT;
 
-    #[allow(non_upper_case_globals)]
     #[group(0)]
     #[binding(8)]
     static depth_tex: texture_depth_2d = ConstDefault::DEFAULT;
 
-    #[allow(non_upper_case_globals)]
     #[group(0)]
     #[binding(9)]
     static smp_cmp: sampler_comparison = ConstDefault::DEFAULT;
 
-    #[allow(non_upper_case_globals)]
     #[group(0)]
     #[binding(10)]
     static tex_1d: texture_1d<f32> = ConstDefault::DEFAULT;
@@ -141,9 +133,9 @@ mod triangle {
     #[vertex]
     fn vs_main(#[builtin(vertex_index)] vid: u32) -> VsOut {
         // let mut -> var;  `vid as f32` -> `f32(vid)`
-        // Vec2::new(x, y) -> WGSL vec2<f32>(x, y)(glam 构造映射)
-        let mut p = Vec2::new(vid as f32, 0.0) * u_scale; // 向量 * 标量
-        p = p - Vec2::new(0.5, 0.0); // 向量 - 向量
+        // vec2f!(x, y) -> WGSL vec2<f32>(x, y)(构造宏 → WGSL 构造器)
+        let mut p = vec2f!(vid as f32, 0.0) * u_scale; // 向量 * 标量
+        p = p - vec2f!(0.5, 0.0); // 向量 - 向量
 
         // if / else if / else
         let mut sign = 1.0;
@@ -182,7 +174,7 @@ mod triangle {
 
         let d = length(p); // 数学函数桩: length(vec) -> f32
         let a = clamp(d, 0.0, 1.0);
-        let pos4 = Vec4::new(p.x, p.y * a, 0.0, 1.0);
+        let pos4 = vec4f!(p.x, p.y * a, 0.0, 1.0);
         // MVP:先变换再输出(矩阵来自 Camera uniform,Mat4 × Vec4)
         // struct 字面量(按声明顺序)→ WGSL 位置构造器 VsOut(pos, uv)
         return VsOut {
@@ -199,27 +191,45 @@ mod triangle {
         // 2D 采样 × uniform 颜色(textureSample 返回 Vec4)
         let c = textureSample(tex, smp, uv) * u_color;
         // 纹理家族:cube / 2d_array / depth+compare(Rust 名 → WGSL 名走改名表)
-        let env = texture_sample_cube(tex_cube, smp, Vec3::new(uv.x, uv.y, 1.0));
+        let env = texture_sample_cube(tex_cube, smp, vec3f!(uv.x, uv.y, 1.0));
         let arr = texture_sample_array(tex_arr, smp, uv, 0);
         let sh = texture_sample_compare(depth_tex, smp_cmp, uv, 0.5);
-        let lit = c * env * arr * Vec4::new(sh, sh, sh, 1.0);
-        return pow(lit, Vec4::new(GAMMA, GAMMA, GAMMA, 1.0));
+        let lit = c * env * arr * vec4f!(sh, sh, sh, 1.0);
+        return pow(lit, vec4f!(GAMMA, GAMMA, GAMMA, 1.0));
     }
 
-    // 非入口辅助函数:同样会被翻译并校验(Mat3::from_cols 按列传列构造、
+    // 非入口辅助函数:同样会被翻译并校验(mat3x3f! 按列传列构造/对角矩阵、
     // 矩阵×矩阵、矩阵×向量——WGSL 的 mat3x3<f32>(vec3<f32>…) 同构)
     fn transform_tangent(p: Vec3) -> Vec3 {
-        let basis = Mat3::from_cols(
-            Vec3::new(1.0, 0.0, 0.0), //
-            Vec3::new(0.0, 1.0, 0.0), //
-            Vec3::new(0.0, 0.0, 1.0), //
+        let basis = mat3x3f!(
+            vec3f!(1.0, 0.0, 0.0), //
+            vec3f!(0.0, 1.0, 0.0), //
+            vec3f!(0.0, 0.0, 1.0), //
         );
-        let rot = Mat3::from_cols(
-            Vec3::new(0.0, -1.0, 0.0), //
-            Vec3::new(1.0, 0.0, 0.0),  //
-            Vec3::new(0.0, 0.0, 1.0),  //
+        let rot = mat3x3f!(
+            vec3f!(0.0, -1.0, 0.0), //
+            vec3f!(1.0, 0.0, 0.0),  //
+            vec3f!(0.0, 0.0, 1.0),  //
         );
-        return (basis * rot) * p; // 矩阵×矩阵 再 矩阵×向量
+        let scale = mat3x3f!(2.0); // 单标量 → 对角矩阵(WGSL 语义)
+        return (basis * rot) * (scale * p); // 矩阵×矩阵 再 矩阵×向量
+    }
+
+    // 构造宏冒烟函数(非入口,同样会被翻译并 naga 校验):
+    // vec2f! 单参 splat、mat2x2f! 对角、mat4x4f! 16 标量、vec4f! 全填/splat
+    fn macro_smoke(v: f32) -> f32 {
+        let a = vec2f!(v); // splat → vec2<f32>(v, v)
+        let m = mat2x2f!(v); // 对角 → mat2x2<f32>(v, 0.0, 0.0, v)
+        let c = m * a;
+        let id4 = mat4x4f!(
+            1.0, 0.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0, //
+            0.0, 0.0, 0.0, 1.0, //
+        );
+        let d = id4 * vec4f!(v, v, v, v);
+        let e = id4 * vec4f!(v); // splat → vec4<f32>(v, v, v, v)
+        return c.x + c.y + d.x + e.y;
     }
 
     // 元组+trait 重载模拟实验(textureLoad 接收整包元组,三种签名):
@@ -238,17 +248,17 @@ mod triangle {
     #[workgroup_size(8)]
     unsafe fn cs_main(#[builtin(global_invocation_id)] gid: UVec3) {
         let i = gid.x; // u32 下标直接可用(桩库 array 实现了 Index<u32>)
-                       // Mat2::from_cols 旋转(u_scale 当角度),顺带覆盖 mat2x2 × vec2 与 cos/sin
+                       // mat2x2f! 按两列向量构造旋转(u_scale 当角度),
+                       // 顺带覆盖 mat2x2 × vec2 与 cos/sin
         let ang = u_scale;
-        let rot = Mat2::from_cols(
-            Vec2::new(cos(ang), sin(ang)),  //
-            Vec2::new(-sin(ang), cos(ang)), //
+        let rot = mat2x2f!(
+            vec2f!(cos(ang), sin(ang)),  //
+            vec2f!(-sin(ang), cos(ang)), //
         );
-        let p2 = rot * Vec2::new(i as f32, 0.0);
-        buf.pos[i] = Vec4::new(p2.x, p2.y, 0.0, 1.0);
+        let p2 = rot * vec2f!(i as f32, 0.0);
+        buf.pos[i] = vec4f!(p2.x, p2.y, 0.0, 1.0);
     }
 }
-
 
 fn main() {
     // 宏吐出的 WGSL(现在是真翻译产物)
