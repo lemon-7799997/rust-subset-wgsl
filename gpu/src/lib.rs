@@ -1,117 +1,32 @@
-//! # gpu —— WGSL 桩库(no-op, 只服务类型检查)
+//! # gpu —— WGSL 桩库(no-op, 只服务类型检查;向量/矩阵来自 glam)
 //!
-//! 这里的每个名字都对应一个 WGSL 里的名字。翻译器(`gpu-macro`)看到它们
-//! 时原样照抄,所以:
-//!   - 类型名/函数名**必须**和 WGSL 完全一致(因此才全是小写,靠
-//!     `non_camel_case_types` 豁免 lint);
-//!   - 函数体永远不该被执行,全部 `unimplemented!()`;
+//! 全 glam 迁移之后,本 crate 里剩下的桩只有两类:
+//!   - **WGSL-only 的名字**(翻译器看到时 1:1 照抄):
+//!     texture/sampler handle、`array<T>`、数学自由函数;
+//!   - **glam 再导出**(翻译器看到时按映射表译回 WGSL):
+//!     `Vec2/Vec3/Vec4` → `vec2/vec3/vec4<f32>`、`Mat2/Mat3/Mat4` →
+//!     `mat2x2/mat3x3/mat4x4<f32>`、`IVec*/UVec*` → `vecN<i32>/vecN<u32>`。
+//!
+//! 规矩没变:
+//!   - 桩函数体永远不该被执行,数学/纹理桩全部 `unimplemented!()`;
 //!   - 签名目前故意很松(泛型不加约束),以后再用 trait 收紧,
 //!     让"错得离谱"的调用在 Rust 侧就报错。
+//!   - glam 是**真类型**:重放副本对向量/矩阵运算是真实检查,比老桩更强;
+//!     shader 代码 CPU 侧不执行,但共享 struct 的字段可以直接在 CPU 用。
 #![allow(non_camel_case_types, non_snake_case)]
 
 use core::marker::PhantomData;
-use core::ops::{Add, Div, Mul, Sub};
-use core::str;
 
 // ============================================================================
-// 向量类型: vec2<T> / vec3<T> / vec4<T>
-// 字段名 = WGSL 字段访问名(x/y/z/w),翻译时原样保留。
+// 向量/矩阵类型 = glam(单一来源,CPU/GPU 同构)
+// 翻译器(gpu-macro)的 map_wgsl_type 认得下面这些名字,声明位置译回 WGSL 名。
 // ============================================================================
 
-#[derive(Clone, Copy, Debug, Default, gpu_macro::ConstDefault, PartialEq)]
-pub struct vec2<T> {
-    pub x: T,
-    pub y: T,
-}
-
-#[derive(Clone, Copy, Debug, Default, gpu_macro::ConstDefault, PartialEq)]
-pub struct vec3<T> {
-    pub x: T,
-    pub y: T,
-    pub z: T,
-}
-
-#[derive(Clone, Copy, Debug, Default, gpu_macro::ConstDefault, PartialEq)]
-pub struct vec4<T> {
-    pub x: T,
-    pub y: T,
-    pub z: T,
-    pub w: T,
-}
-
-// 构造函数: 类型在 type namespace, 函数在 value namespace, 可以同名。
-// 调用点写成 vec2::<f32>(x, y)(turbofish),翻译时把 `::<` 换成 `<` 就是
-// WGSL 的 vec2<f32>(x, y);元素类型显式写在代码里,翻译器不用猜。
-#[inline]
-pub const fn vec2<T>(x: T, y: T) -> vec2<T> {
-    vec2 { x, y }
-}
-
-#[inline]
-pub const fn vec3<T>(x: T, y: T, z: T) -> vec3<T> {
-    vec3 { x, y, z }
-}
-
-#[inline]
-pub const fn vec4<T>(x: T, y: T, z: T, w: T) -> vec4<T> {
-    vec4 { x, y, z, w }
-}
-
-// 运算符: 分量级 + - * /,以及 *f32 /f32(标量只支持 f32,后面需要再加)
-macro_rules! impl_vec_ops {
-    ($v:ident { $($f:ident),+ }) => {
-        impl<T: Copy + Add<Output = T>> Add for $v<T> {
-            type Output = Self;
-            #[inline]
-            fn add(self, o: Self) -> Self {
-                $v { $($f: self.$f + o.$f),+ }
-            }
-        }
-        impl<T: Copy + Sub<Output = T>> Sub for $v<T> {
-            type Output = Self;
-            #[inline]
-            fn sub(self, o: Self) -> Self {
-                $v { $($f: self.$f - o.$f),+ }
-            }
-        }
-        impl<T: Copy + Mul<Output = T>> Mul for $v<T> {
-            type Output = Self;
-            #[inline]
-            fn mul(self, o: Self) -> Self {
-                $v { $($f: self.$f * o.$f),+ }
-            }
-        }
-        impl<T: Copy + Div<Output = T>> Div for $v<T> {
-            type Output = Self;
-            #[inline]
-            fn div(self, o: Self) -> Self {
-                $v { $($f: self.$f / o.$f),+ }
-            }
-        }
-        impl<T: Copy + Mul<f32, Output = T>> Mul<f32> for $v<T> {
-            type Output = Self;
-            #[inline]
-            fn mul(self, s: f32) -> Self {
-                $v { $($f: self.$f * s),+ }
-            }
-        }
-        impl<T: Copy + Div<f32, Output = T>> Div<f32> for $v<T> {
-            type Output = Self;
-            #[inline]
-            fn div(self, s: f32) -> Self {
-                $v { $($f: self.$f / s),+ }
-            }
-        }
-    };
-}
-
-impl_vec_ops!(vec2 { x, y });
-impl_vec_ops!(vec3 { x, y, z });
-impl_vec_ops!(vec4 { x, y, z, w });
+pub use glam::{IVec2, IVec3, IVec4, Mat2, Mat3, Mat4, UVec2, UVec3, UVec4, Vec2, Vec3, Vec4};
 
 // ============================================================================
-// 常用数学函数(no-op 桩)
-// TODO: 签名太松(比如 clamp 应该区分 vec/scalar 混用),以后用 trait 收紧。
+// 数学自由函数(no-op 桩;泛型签名,glam 向量/标量都能进)
+// 名字 = WGSL 名,翻译器 1:1 透传。调用点写法与 WGSL 完全一致。
 // ============================================================================
 
 /// 一元标量/向量函数,一一对应 WGSL 内建。
@@ -295,53 +210,44 @@ pub struct sampler_comparison;
 // 重载的;Rust 没有重载 → 同 WGSL 名的不同签名必须拆成不同 Rust 名
 // (texture_sample_cube / texture_sample_array / ...),翻译器按改名表把它们
 // 映射回 WGSL 名(见 gpu-macro 里 map_wgsl_name)。
+// 全 glam 迁移后,坐标/返回值类型直接用 glam(Vec2/Vec3/IVec3/UVec2...)。
 
-pub fn textureSample<T>(t: texture_2d<T>, s: sampler, uv: vec2<f32>) -> vec4<f32> {
+pub fn textureSample<T>(t: texture_2d<T>, s: sampler, uv: Vec2) -> Vec4 {
     let _ = (t, s, uv);
     unimplemented!("no-op stub: only for type checking")
 }
 
-pub fn texture_sample_cube<T>(t: texture_cube<T>, s: sampler, uvw: vec3<f32>) -> vec4<f32> {
+pub fn texture_sample_cube<T>(t: texture_cube<T>, s: sampler, uvw: Vec3) -> Vec4 {
     let _ = (t, s, uvw);
     unimplemented!("no-op stub: only for type checking")
 }
 
-pub fn texture_sample_array<T>(
-    t: texture_2d_array<T>,
-    s: sampler,
-    uv: vec2<f32>,
-    layer: i32,
-) -> vec4<f32> {
+pub fn texture_sample_array<T>(t: texture_2d_array<T>, s: sampler, uv: Vec2, layer: i32) -> Vec4 {
     let _ = (t, s, uv, layer);
     unimplemented!("no-op stub: only for type checking")
 }
 
-pub fn texture_sample_depth(t: texture_depth_2d, s: sampler, uv: vec2<f32>) -> f32 {
+pub fn texture_sample_depth(t: texture_depth_2d, s: sampler, uv: Vec2) -> f32 {
     let _ = (t, s, uv);
     unimplemented!("no-op stub: only for type checking")
 }
 
-pub fn texture_sample_compare(
-    t: texture_depth_2d,
-    s: sampler_comparison,
-    uv: vec2<f32>,
-    depth_ref: f32,
-) -> f32 {
+pub fn texture_sample_compare(t: texture_depth_2d, s: sampler_comparison, uv: Vec2, depth_ref: f32) -> f32 {
     let _ = (t, s, uv, depth_ref);
     unimplemented!("no-op stub: only for type checking")
 }
 
-pub fn texture_load_cube<T>(t: texture_cube<T>, coords: vec3<i32>, level: i32) -> vec4<f32> {
+pub fn texture_load_cube<T>(t: texture_cube<T>, coords: IVec3, level: i32) -> Vec4 {
     let _ = (t, coords, level);
     unimplemented!("no-op stub: only for type checking")
 }
 
-pub fn textureDimensions<T>(t: texture_2d<T>, level: i32) -> vec2<u32> {
+pub fn textureDimensions<T>(t: texture_2d<T>, level: i32) -> UVec2 {
     let _ = (t, level);
     unimplemented!("no-op stub: only for type checking")
 }
 
-pub fn texture_dimensions_array<T>(t: texture_2d_array<T>, level: i32) -> vec2<u32> {
+pub fn texture_dimensions_array<T>(t: texture_2d_array<T>, level: i32) -> UVec2 {
     let _ = (t, level);
     unimplemented!("no-op stub: only for type checking")
 }
@@ -351,6 +257,7 @@ pub fn texture_dimensions_array<T>(t: texture_2d_array<T>, level: i32) -> vec2<u
 // 只放一个 phantom 元素,Index/IndexMut 忽略下标——目的纯粹是让重放副本
 // 能过 rustc 类型检查;真正的数组是 WGSL 侧的 storage buffer 成员。
 // WGSL 数组下标是 u32/i32,所以支持 usize/u32 下标,让源写法贴近 WGSL。
+// 元素类型可以是 glam 向量(如 array<Vec4>),只要 T: ConstDefault。
 // ============================================================================
 
 pub trait ConstDefault {
@@ -440,196 +347,78 @@ impl ConstDefault for &'static str {
     const DEFAULT: Self = "";
 }
 
-// ============================================================================
-// mat4x4<T>:4x4 矩阵(真容器,列主序,按"必须的功能"口径实现 矩阵×向量)
-// 字段 c0..c3 = 4 个列向量;构造器 16 个标量(列主序),翻译后就是 WGSL 的
-// mat4x4<f32>(...),参数顺序文本直通。
-// ============================================================================
+// ---- glam 类型也要能当"默认初值"(static 初值、array<T> 元素) ----
+// gpu 定义了 ConstDefault(本地 trait),所以在这里给外来 glam 类型补 impl
+// 不违反孤儿规则。初值只用于 Rust 侧 static 初始化,翻译时被丢弃。
 
-#[derive(Clone, Copy, Debug, PartialEq, gpu_macro::ConstDefault)]
-pub struct mat4x4<T> {
-    pub c0: vec4<T>,
-    pub c1: vec4<T>,
-    pub c2: vec4<T>,
-    pub c3: vec4<T>,
+macro_rules! impl_const_default_glam {
+    ($($ty:ty => $default:expr),+ $(,)?) => {
+        $(
+            impl ConstDefault for $ty {
+                const DEFAULT: Self = $default;
+            }
+        )+
+    };
 }
 
-/// WGSL mat4x4<f32>(...) 构造器;Rust 侧写 mat4x4::<f32>(16 个标量)。
-#[inline]
-pub const fn mat4x4<T>(
-    a0: T, a1: T, a2: T, a3: T, //
-    a4: T, a5: T, a6: T, a7: T, //
-    a8: T, a9: T, a10: T, a11: T, //
-    a12: T, a13: T, a14: T, a15: T, //
-) -> mat4x4<T> {
-    mat4x4 {
-        c0: vec4::<T>(a0, a1, a2, a3),
-        c1: vec4::<T>(a4, a5, a6, a7),
-        c2: vec4::<T>(a8, a9, a10, a11),
-        c3: vec4::<T>(a12, a13, a14, a15),
-    }
-}
-
-// 矩阵 × 向量(列主序:M*v = Σ c_i * v_i)
-impl<T: Copy + Add<Output = T> + Mul<Output = T>> Mul<vec4<T>> for mat4x4<T> {
-    type Output = vec4<T>;
-    #[inline]
-    fn mul(self, v: vec4<T>) -> vec4<T> {
-        vec4 {
-            x: self.c0.x * v.x + self.c1.x * v.y + self.c2.x * v.z + self.c3.x * v.w,
-            y: self.c0.y * v.x + self.c1.y * v.y + self.c2.y * v.z + self.c3.y * v.w,
-            z: self.c0.z * v.x + self.c1.z * v.y + self.c2.z * v.z + self.c3.z * v.w,
-            w: self.c0.w * v.x + self.c1.w * v.y + self.c2.w * v.z + self.c3.w * v.w,
-        }
-    }
+impl_const_default_glam! {
+    Vec2 => Vec2::ZERO,
+    Vec3 => Vec3::ZERO,
+    Vec4 => Vec4::ZERO,
+    IVec2 => IVec2::ZERO,
+    IVec3 => IVec3::ZERO,
+    IVec4 => IVec4::ZERO,
+    UVec2 => UVec2::ZERO,
+    UVec3 => UVec3::ZERO,
+    UVec4 => UVec4::ZERO,
+    Mat2 => Mat2::IDENTITY,
+    Mat3 => Mat3::IDENTITY,
+    Mat4 => Mat4::IDENTITY,
 }
 
 // ============================================================================
-// mat2x2<T> / mat3x3<T>(补齐矩阵家族,mat4x4 在上方)
-// 列主序真容器:构造器标量个数 = N*N;支持 矩阵×向量 与 矩阵×矩阵。
-// ============================================================================
-
-#[derive(Clone, Copy, Debug, PartialEq, gpu_macro::ConstDefault)]
-pub struct mat2x2<T> {
-    pub c0: vec2<T>,
-    pub c1: vec2<T>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, gpu_macro::ConstDefault)]
-pub struct mat3x3<T> {
-    pub c0: vec3<T>,
-    pub c1: vec3<T>,
-    pub c2: vec3<T>,
-}
-
-/// WGSL mat2x2<f32>(...) 构造器(4 个标量,列主序)。
-#[inline]
-pub const fn mat2x2<T>(a0: T, a1: T, a2: T, a3: T) -> mat2x2<T> {
-    mat2x2 {
-        c0: vec2::<T>(a0, a1),
-        c1: vec2::<T>(a2, a3),
-    }
-}
-
-/// WGSL mat3x3<f32>(...) 构造器(9 个标量,列主序)。
-#[inline]
-pub const fn mat3x3<T>(
-    a0: T, a1: T, a2: T, //
-    a3: T, a4: T, a5: T, //
-    a6: T, a7: T, a8: T, //
-) -> mat3x3<T> {
-    mat3x3 {
-        c0: vec3::<T>(a0, a1, a2),
-        c1: vec3::<T>(a3, a4, a5),
-        c2: vec3::<T>(a6, a7, a8),
-    }
-}
-
-// mat2x2 × vec2
-impl<T: Copy + Add<Output = T> + Mul<Output = T>> Mul<vec2<T>> for mat2x2<T> {
-    type Output = vec2<T>;
-    #[inline]
-    fn mul(self, v: vec2<T>) -> vec2<T> {
-        vec2 {
-            x: self.c0.x * v.x + self.c1.x * v.y,
-            y: self.c0.y * v.x + self.c1.y * v.y,
-        }
-    }
-}
-
-// mat3x3 × vec3
-impl<T: Copy + Add<Output = T> + Mul<Output = T>> Mul<vec3<T>> for mat3x3<T> {
-    type Output = vec3<T>;
-    #[inline]
-    fn mul(self, v: vec3<T>) -> vec3<T> {
-        vec3 {
-            x: self.c0.x * v.x + self.c1.x * v.y + self.c2.x * v.z,
-            y: self.c0.y * v.x + self.c1.y * v.y + self.c2.y * v.z,
-            z: self.c0.z * v.x + self.c1.z * v.y + self.c2.z * v.z,
-        }
-    }
-}
-
-// 矩阵 × 矩阵(列主序:(A*B) 的第 j 列 = A * B 的第 j 列)
-impl<T: Copy + Add<Output = T> + Mul<Output = T>> Mul for mat2x2<T> {
-    type Output = Self;
-    #[inline]
-    fn mul(self, o: Self) -> Self {
-        mat2x2 {
-            c0: self * o.c0,
-            c1: self * o.c1,
-        }
-    }
-}
-
-impl<T: Copy + Add<Output = T> + Mul<Output = T>> Mul for mat3x3<T> {
-    type Output = Self;
-    #[inline]
-    fn mul(self, o: Self) -> Self {
-        mat3x3 {
-            c0: self * o.c0,
-            c1: self * o.c1,
-            c2: self * o.c2,
-        }
-    }
-}
-
-impl<T: Copy + Add<Output = T> + Mul<Output = T>> Mul for mat4x4<T> {
-    type Output = Self;
-    #[inline]
-    fn mul(self, o: Self) -> Self {
-        mat4x4 {
-            c0: self * o.c0,
-            c1: self * o.c1,
-            c2: self * o.c2,
-            c3: self * o.c3,
-        }
-    }
-}
-
-// ============================================================================
-// 实验 v2:用「自由函数接收元组 + trait 分发」模拟函数重载
+// 重载模拟:用「自由函数接收元组 + trait 分发」模拟 textureLoad 重载
 // ============================================================================
 // WGSL 的 textureLoad 按纹理类型有多个签名,而 Rust 没有函数重载。
 // 这里让 textureLoad 整体接收一个元组,trait 按元组形状选实现:
 //
-//   textureLoad((texture_1d<ST>,       C,        L))
-//   textureLoad((texture_2d<ST>,       vec2<C>,  L))
-//   textureLoad((texture_2d_array<ST>, vec2<C>,  A, L))
+//   textureLoad((texture_1d<ST>,       C,    L))
+//   textureLoad((texture_2d<ST>,       IVec2, L))
+//   textureLoad((texture_2d_array<ST>, IVec2, A, L))
 //
 // 调用点写法与 WGSL 名完全一致(只是参数变成"一整包元组");
 // rustc 靠 A: TextureLoad 约束检查元组形状/类型;
 // 翻译器(gpu-macro)看到 textureLoad((…)) 会把元组摊平成 textureLoad(…)。
-// ============================================================================
 
 pub trait TextureLoad {
-    /// 每个签名自己的返回类型(纹理元素类型 ST 决定 vec4<ST>)。
+    /// 返回类型。全 glam 迁移后采样结果统一是 f32 四元组 Vec4
+    /// (WGSL textureLoad 的元素类型实际由纹理格式决定,这里只支持 f32 系)。
     type Output;
     fn load(self) -> Self::Output;
 }
 
 impl<ST, C, L> TextureLoad for (texture_1d<ST>, C, L) {
-    type Output = vec4<ST>;
+    type Output = Vec4;
     #[inline]
-    fn load(self) -> vec4<ST> {
+    fn load(self) -> Vec4 {
         let _ = self;
         unimplemented!("no-op stub: only for type checking")
     }
 }
 
-impl<ST, C, L> TextureLoad for (texture_2d<ST>, vec2<C>, L) {
-    type Output = vec4<ST>;
+impl<ST, L> TextureLoad for (texture_2d<ST>, IVec2, L) {
+    type Output = Vec4;
     #[inline]
-    fn load(self) -> vec4<ST> {
+    fn load(self) -> Vec4 {
         let _ = self;
         unimplemented!("no-op stub: only for type checking")
     }
 }
 
-impl<ST, A, C, L> TextureLoad for (texture_2d_array<ST>, vec2<C>, A, L) {
-    type Output = vec4<ST>;
+impl<ST, A, L> TextureLoad for (texture_2d_array<ST>, IVec2, A, L) {
+    type Output = Vec4;
     #[inline]
-    fn load(self) -> vec4<ST> {
+    fn load(self) -> Vec4 {
         let _ = self;
         unimplemented!("no-op stub: only for type checking")
     }

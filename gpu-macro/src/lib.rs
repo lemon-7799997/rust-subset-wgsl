@@ -15,6 +15,10 @@
 //!   - 模块级 `static` + `#[group(..)] #[binding(..)]` → `@group(..) @binding(..) var<uniform>`;
 //!     `#[storage(..)]` → `<storage>` 地址空间
 //!   - 模块级 `const`(自动提前到模块最前)
+//!   - **glam 向量/矩阵(全 glam 迁移)**:类型名在声明/构造位置译回 WGSL——
+//!     `Vec4` → `vec4<f32>`、`UVec3` → `vec3<u32>`、`Mat4` → `mat4x4<f32>`;
+//!     `Vec4::new(..)` / `Vec4::splat(v)` → `vec4<f32>(..)` / `vec4<f32>(v,v,v,v)`;
+//!     `Mat4::from_cols(列向量…)` → `mat4x4<f32>(列向量…)`(按列传构造)
 //!   - 模块内 `struct Name { ... }`:
 //!       * 成员上的 `#[builtin(..)]/#[location(..)]/#[interpolate(..)]` → `@...`(成员装饰)
 //!       * 布局属性 `#[align(N)]/#[size(N)]` → 成员 `@align(N)` / `@size(N)`
@@ -25,7 +29,7 @@
 //!   - fn 级 `#[builtin(..)]/#[location(..)]` → 挪到返回类型前(`-> @builtin(position) vec4<f32>`)
 //!   - 参数属性 → 原样变成 `@...`
 //!   - `let mut x = e;` → `var x = e;`;`let x = e;` → `let x = e;`
-//!   - `e as f32` → `f32(e)`;`vec2::<f32>(..)` → `vec2<f32>(..)`(turbofish 的 `::` 被吃掉)
+//!   - `e as f32` → `f32(e)`(转换构造器)
 //!   - 语句: if/else if/else、loop、while、`for k in 0..N`(重写成 WGSL for 头)、
 //!     break/continue、return
 //!   - 宏展开期 naga 自校验(feature `self-validate`,默认开)
@@ -115,6 +119,32 @@ fn map_wgsl_name(rust_name: &str) -> &str {
     }
 }
 
+/// glam 向量/矩阵类型 → (WGSL 基底名, 元素类型, 分量数/列数)。
+/// 全 glam 迁移后:声明/构造位置的 glam 名要译回 WGSL 文本,例如
+///   Vec4 → vec4<f32>、Mat4 → mat4x4<f32>、UVec3 → vec3<u32>。
+fn glam_type_shape(name: &str) -> Option<(&'static str, &'static str, usize)> {
+    Some(match name {
+        "Vec2" => ("vec2", "f32", 2),
+        "Vec3" => ("vec3", "f32", 3),
+        "Vec4" => ("vec4", "f32", 4),
+        "IVec2" => ("vec2", "i32", 2),
+        "IVec3" => ("vec3", "i32", 3),
+        "IVec4" => ("vec4", "i32", 4),
+        "UVec2" => ("vec2", "u32", 2),
+        "UVec3" => ("vec3", "u32", 3),
+        "UVec4" => ("vec4", "u32", 4),
+        "Mat2" => ("mat2x2", "f32", 2),
+        "Mat3" => ("mat3x3", "f32", 3),
+        "Mat4" => ("mat4x4", "f32", 4),
+        _ => return None,
+    })
+}
+
+/// 类型声明位置的 glam 名 → 完整 WGSL 类型文本(如 "Vec4" → "vec4<f32>")。
+fn map_wgsl_type(name: &str) -> Option<String> {
+    glam_type_shape(name).map(|(base, elem, _)| format!("{base}<{elem}>"))
+}
+
 fn print_generic_arg(arg: &GenericArgument) -> Result<String, syn::Error> {
     match arg {
         GenericArgument::Type(t) => print_type(t),
@@ -132,6 +162,14 @@ fn print_type(ty: &Type) -> Result<String, syn::Error> {
                 None => return Err(err(ty, "空路径类型")),
             };
             let name = seg.ident.to_string();
+            // glam 向量/矩阵是具体类型(不带泛型参数),直接映射成带元素类型的
+            // WGSL 文本:Vec4 → vec4<f32>、UVec3 → vec3<u32>、Mat4 → mat4x4<f32>。
+            if let Some(mapped) = map_wgsl_type(&name) {
+                if !matches!(seg.arguments, syn::PathArguments::None) {
+                    return Err(err(seg, "glam 向量/矩阵不带泛型参数,请直接写类型名"));
+                }
+                return Ok(mapped);
+            }
             match &seg.arguments {
                 syn::PathArguments::None => Ok(name),
                 syn::PathArguments::AngleBracketed(ab) => {
@@ -215,7 +253,40 @@ impl Ctx<'_> {
                     .map(|a| self.print_expr(a))
                     .collect::<Result<Vec<_>, _>>()?
                     .join(", ");
-                // 带 turbofish 泛型 → 类型构造器: vec2::<f32>(..) → vec2<f32>(..)
+                // glam 构造调用(路径 = <类型>::<方法>):值的构造也要译回 WGSL 构造器:
+                //   Vec4::new(x, y, z, w) → vec4<f32>(x, y, z, w)
+                //   Vec4::splat(v)        → vec4<f32>(v, v, v, v)(展开最稳)
+                //   Mat4::from_cols(c0..) → mat4x4<f32>(c0, ...)(WGSL 支持按列传列向量)
+                // 其余 glam 路径调用(常量如 Vec4::ZERO、未知方法)一律报错,不静默透传。
+                if func.path.segments.len() >= 2 {
+                    let n = func.path.segments.len();
+                    let base_name = func.path.segments[n - 2].ident.to_string();
+                    let method = func.path.segments[n - 1].ident.to_string();
+                    if let Some((wgsl_base, elem, dim)) = glam_type_shape(&base_name) {
+                        let text = match method.as_str() {
+                            "new" => format!("{wgsl_base}<{elem}>({args})"),
+                            "splat" if call.args.len() == 1 => format!(
+                                "{wgsl_base}<{elem}>({})",
+                                vec![args.clone(); dim].join(", ")
+                            ),
+                            "from_cols" if wgsl_base.starts_with("mat") => {
+                                format!("{wgsl_base}<{elem}>({args})")
+                            }
+                            _ => {
+                                return Err(syn::Error::new_spanned(
+                                    &func.path,
+                                    format!(
+                                        "glam `{base_name}::{method}` 不能翻译成 WGSL \
+                                         (只支持 new / splat / MatN::from_cols 构造;常量与方法调用暂不支持)"
+                                    ),
+                                ))
+                            }
+                        };
+                        return Ok(text);
+                    }
+                }
+                // 带 turbofish 泛型 → 类型构造器(老语法:vec2::<f32>(..) → vec2<f32>(..);
+                // 全 glam 迁移后向量走上面的 VecN::new,这条留给其他显式泛型调用)
                 if let Some(seg) = func.path.segments.last() {
                     if let syn::PathArguments::AngleBracketed(ab) = &seg.arguments {
                         let tys = ab

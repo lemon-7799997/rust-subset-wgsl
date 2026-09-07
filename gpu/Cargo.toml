@@ -8,3 +8,7 @@ name = "gpu"
 
 [dependencies]
 gpu-macro = { path = "../gpu-macro" }
+# 向量/矩阵类型直接来自 glam(全 glam 迁移):
+# shader 里写 Vec2/Vec3/Vec4、Mat2/Mat3/Mat4、IVec*/UVec*,
+# 翻译器按映射表译回 WGSL 的 vecN<f32>/matNxN<f32>/vecN<i32>/vecN<u32>。
+glam = "0.32"
